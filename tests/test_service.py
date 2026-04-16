@@ -209,6 +209,35 @@ def test_agent_service_run_simulation_cycle(settings, market_snapshot, market_as
     cycle = service.run_simulation_cycle("123")
     assert cycle["decision_status"] == "APPROVED"
     assert cycle["readonly"] is True
+    assert cycle["fair_probability"] == market_assessment.fair_probability
+    assert cycle["confidence"] == market_assessment.confidence
+    assert cycle["suggested_side"] == market_assessment.suggested_side.value
+
+
+def test_agent_service_report_formats_simulation_cycle_summary(settings) -> None:
+    service = AgentService(settings)
+    service.journal.log_event(
+        "simulation_cycle",
+        {
+            "market_id": "1938163",
+            "question": "Will the price of Bitcoin be above $82,000 on April 17?",
+            "market_implied_probability": 0.002,
+            "fair_probability": 0.0015,
+            "confidence": 0.0,
+            "edge": 0.0,
+            "suggested_side": "ABSTAIN",
+            "decision_status": "REJECTED",
+            "decision_side": "ABSTAIN",
+            "limit_price": 0.999,
+            "size_usd": 0.0,
+            "rejected_by": ["spread_limit", "confidence_limit", "edge_limit"],
+            "readonly": True,
+        },
+    )
+    report = service.generate_operator_report("session-sim")
+    assert any("Will the price of Bitcoin be above $82,000 on April 17?" in item for item in report.items)
+    assert any("decision=REJECTED" in item for item in report.items)
+    assert any("rejected_by=spread_limit,confidence_limit,edge_limit" in item for item in report.items)
 
 
 def test_agent_service_get_active_market_id(settings, market_candidate) -> None:

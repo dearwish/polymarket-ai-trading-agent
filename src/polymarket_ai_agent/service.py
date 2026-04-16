@@ -123,6 +123,11 @@ class AgentService:
         cycle = {
             "market_id": snapshot.candidate.market_id,
             "question": snapshot.candidate.question,
+            "market_implied_probability": snapshot.candidate.implied_probability,
+            "fair_probability": assessment.fair_probability,
+            "confidence": assessment.confidence,
+            "edge": assessment.edge,
+            "suggested_side": assessment.suggested_side.value,
             "decision_status": decision.status.value,
             "decision_side": decision.side.value,
             "limit_price": decision.limit_price,
@@ -209,6 +214,46 @@ class AgentService:
 
     @staticmethod
     def _format_event_payload(payload: dict) -> str:
+        if "question" in payload and "decision_status" in payload and payload.get("readonly") is True:
+            rejected_by = payload.get("rejected_by") or []
+            rejected_text = ",".join(rejected_by) if rejected_by else "none"
+            return (
+                f"{payload['question']} | implied={payload.get('market_implied_probability', 0.0):.4f} "
+                f"| fair={payload.get('fair_probability', 0.0):.4f} "
+                f"| conf={payload.get('confidence', 0.0):.2f} "
+                f"| edge={payload.get('edge', 0.0):.4f} "
+                f"| suggested={payload.get('suggested_side', 'n/a')} "
+                f"| decision={payload['decision_status']} "
+                f"| rejected_by={rejected_text}"
+            )
+        if "fair_probability" in payload and "confidence" in payload and "edge" in payload:
+            return (
+                f"market_id={payload.get('market_id', 'n/a')} "
+                f"| fair={payload['fair_probability']:.4f} "
+                f"| conf={payload['confidence']:.2f} "
+                f"| edge={payload['edge']:.4f} "
+                f"| suggested={payload.get('suggested_side', 'n/a')}"
+            )
+        if "status" in payload and "rejected_by" in payload:
+            rejected_by = payload.get("rejected_by") or []
+            rejected_text = ",".join(rejected_by) if rejected_by else "none"
+            return (
+                f"market_id={payload.get('market_id', 'n/a')} "
+                f"| status={payload['status']} "
+                f"| side={payload.get('side', 'n/a')} "
+                f"| size={payload.get('size_usd', 0.0):.2f} "
+                f"| rejected_by={rejected_text}"
+            )
+        if "candidate" in payload and "orderbook" in payload:
+            candidate = payload["candidate"]
+            orderbook = payload["orderbook"]
+            return (
+                f"{candidate.get('question', 'n/a')} "
+                f"| midpoint={orderbook.get('midpoint', 0.0):.4f} "
+                f"| spread={orderbook.get('spread', 0.0):.4f} "
+                f"| depth={orderbook.get('depth_usd', 0.0):.2f} "
+                f"| ttl={payload.get('seconds_to_expiry', -1)}s"
+            )
         if "market_id" in payload:
             return f"market_id={payload['market_id']}"
         if "count" in payload:
