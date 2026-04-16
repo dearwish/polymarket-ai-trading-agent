@@ -83,3 +83,6 @@ def test_portfolio_closes_position_and_realizes_pnl(settings) -> None:
     assert engine.list_open_positions() == []
     account_state = engine.get_account_state(ExecutionMode.PAPER)
     assert account_state.daily_realized_pnl > 0
+    closed = engine.list_closed_positions(limit=5)
+    assert len(closed) == 1
+    assert closed[0].close_reason == "ttl_expired"

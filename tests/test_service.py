@@ -93,3 +93,52 @@ def test_agent_service_manage_open_positions(settings, market_snapshot) -> None:
     assert len(actions) == 1
     assert actions[0].action == "CLOSE"
     assert actions_seen[0][2] == "ttl_expired"
+
+
+def test_agent_service_close_position(settings, market_snapshot) -> None:
+    service = AgentService(settings)
+    service.portfolio.get_open_position = lambda market_id: object()
+    service.build_market_snapshot = lambda market_id: market_snapshot
+    seen = {}
+
+    def close_position(market_id: str, exit_price: float, reason: str):
+        from polymarket_ai_agent.types import PositionAction
+
+        seen["call"] = (market_id, exit_price, reason)
+        return PositionAction(market_id=market_id, action="CLOSE", reason=reason)
+
+    service.portfolio.close_position = close_position
+    action = service.close_position("123", reason="manual_close")
+    assert action.action == "CLOSE"
+    assert seen["call"][0] == "123"
+    assert seen["call"][2] == "manual_close"
+
+
+def test_agent_service_close_position_noop_when_missing(settings) -> None:
+    service = AgentService(settings)
+    service.portfolio.get_open_position = lambda market_id: None
+    action = service.close_position("missing", reason="manual_close")
+    assert action.action == "NOOP"
+    assert action.reason == "Position not open."
+
+
+def test_agent_service_report_includes_portfolio_summaries(settings) -> None:
+    service = AgentService(settings)
+
+    class OpenPosition:
+        market_id = "open-1"
+        side = type("Side", (), {"value": "YES"})()
+        size_usd = 10.0
+        entry_price = 0.52
+
+    class ClosedPosition:
+        market_id = "closed-1"
+        realized_pnl = 1.25
+        close_reason = "manual_close"
+
+    service.portfolio.list_open_positions = lambda: [OpenPosition()]
+    service.portfolio.list_closed_positions = lambda limit=5: [ClosedPosition()]
+    report = service.generate_operator_report("session-portfolio")
+    assert "Open positions: 1" in report.summary
+    assert any("OPEN | open-1" in item for item in report.items)
+    assert any("CLOSED | closed-1" in item for item in report.items)

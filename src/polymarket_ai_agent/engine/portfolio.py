@@ -77,6 +77,20 @@ class PortfolioEngine:
             ).fetchall()
         return [self._row_to_position(row) for row in rows]
 
+    def list_closed_positions(self, limit: int = 20) -> list[PositionRecord]:
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                select market_id, side, size_usd, entry_price, order_id, opened_at, status,
+                       close_reason, closed_at, exit_price, realized_pnl
+                from positions where status = 'CLOSED'
+                order by closed_at desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._row_to_position(row) for row in rows]
+
     def positions_due_for_close(self, ttl_seconds: int, now: datetime | None = None) -> list[PositionRecord]:
         current = now or _utc_now()
         due: list[PositionRecord] = []
@@ -84,6 +98,9 @@ class PortfolioEngine:
             if current - position.opened_at >= timedelta(seconds=ttl_seconds):
                 due.append(position)
         return due
+
+    def get_open_position(self, market_id: str) -> PositionRecord | None:
+        return self._get_open_position(market_id)
 
     def close_position(self, market_id: str, exit_price: float, reason: str, now: datetime | None = None) -> PositionAction:
         current = now or _utc_now()

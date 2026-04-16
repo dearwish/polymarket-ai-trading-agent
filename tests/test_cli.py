@@ -84,6 +84,17 @@ class StubService:
 
         return [Action()]
 
+    def close_position(self, market_id: str, reason: str = "manual_close"):
+        return type(
+            "Action",
+            (),
+            {
+                "market_id": market_id,
+                "action": "CLOSE",
+                "reason": reason,
+            },
+        )()
+
 
 def test_cli_status(monkeypatch) -> None:
     monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
@@ -104,6 +115,13 @@ def test_cli_manage(monkeypatch) -> None:
     result = runner.invoke(app, ["manage"])
     assert result.exit_code == 0
     assert "ttl_expired" in result.stdout
+
+
+def test_cli_close(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["close", "123", "--reason", "manual_close"])
+    assert result.exit_code == 0
+    assert "manual_close" in result.stdout
 
 
 def test_cli_scan_handles_http_errors(monkeypatch) -> None:

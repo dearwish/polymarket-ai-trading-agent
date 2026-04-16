@@ -141,6 +141,24 @@ def manage() -> None:
 
 
 @app.command()
+def close(market_id: str, reason: str = "manual_close") -> None:
+    try:
+        service = _service()
+        action = service.close_position(market_id, reason=reason)
+        console.print_json(
+            json.dumps(
+                {
+                    "market_id": action.market_id,
+                    "action": action.action,
+                    "reason": action.reason,
+                }
+            )
+        )
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
+@app.command()
 def report(session_id: str = "") -> None:
     try:
         service = _service()

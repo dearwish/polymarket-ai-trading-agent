@@ -95,15 +95,44 @@ class AgentService:
             actions.append(action)
         return actions
 
+    def close_position(self, market_id: str, reason: str = "manual_close") -> PositionAction:
+        existing = self.portfolio.get_open_position(market_id)
+        if not existing:
+            action = PositionAction(market_id=market_id, action="NOOP", reason="Position not open.")
+            self.journal.log_event("position_action", action)
+            return action
+        snapshot = self.build_market_snapshot(market_id)
+        action = self.portfolio.close_position(
+            market_id,
+            exit_price=snapshot.orderbook.midpoint,
+            reason=reason,
+        )
+        self.journal.log_event("position_action", action)
+        return action
+
     def generate_operator_report(self, session_id: str | None = None) -> Report:
         reports = self.journal.read_reports()
+        open_positions = self.portfolio.list_open_positions()
+        closed_positions = self.portfolio.list_closed_positions(limit=5)
         items = [f"{row[2]} | {row[0]} | {row[1]}" for row in reports]
+        items.extend(
+            [
+                f"OPEN | {position.market_id} | {position.side.value} | size={position.size_usd:.2f} | entry={position.entry_price:.4f}"
+                for position in open_positions
+            ]
+        )
+        items.extend(
+            [
+                f"CLOSED | {position.market_id} | pnl={position.realized_pnl:.4f} | reason={position.close_reason or 'n/a'}"
+                for position in closed_positions
+            ]
+        )
         if not items:
             items = ["No stored reports yet. Run paper or analyze commands first."]
         report = Report(
             session_id=session_id or str(uuid.uuid4()),
             generated_at=utc_now(),
-            summary="Recent operator-visible reports and run summaries.",
+            summary=f"Open positions: {len(open_positions)} | recently closed: {len(closed_positions)}",
             items=items,
         )
         self.journal.save_report(report.session_id, report.summary)
