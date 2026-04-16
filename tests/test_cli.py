@@ -107,6 +107,9 @@ class StubService:
             },
         }
 
+    def get_active_market_id(self):
+        return "active-123"
+
 
 def test_cli_status(monkeypatch) -> None:
     monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
@@ -163,3 +166,24 @@ def test_cli_run_loop(monkeypatch) -> None:
     result = runner.invoke(app, ["run-loop", "123", "--iterations", "2", "--interval-seconds", "0"])
     assert result.exit_code == 0
     assert "\"iterations\": 2" in result.stdout
+
+
+def test_cli_paper_with_active_market(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["paper", "--active"])
+    assert result.exit_code == 0
+    assert "active-123" in result.stdout
+
+
+def test_cli_run_loop_with_active_market(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["run-loop", "--active", "--iterations", "1", "--interval-seconds", "0"])
+    assert result.exit_code == 0
+    assert "active-123" in result.stdout
+
+
+def test_cli_paper_requires_market_or_active(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["paper"])
+    assert result.exit_code == 1
+    assert "Provide a market_id or pass --active." in result.stdout

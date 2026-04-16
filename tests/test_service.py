@@ -156,3 +156,9 @@ def test_agent_service_run_cycle(settings, market_snapshot, market_assessment) -
     cycle = service.run_cycle("123")
     assert cycle["paper_trade"]["decision_status"] == "APPROVED"
     assert cycle["paper_trade"]["execution_status"] == "FILLED_PAPER"
+
+
+def test_agent_service_get_active_market_id(settings, market_candidate) -> None:
+    service = AgentService(settings)
+    service.polymarket.discover_active_market = lambda: market_candidate
+    assert service.get_active_market_id() == market_candidate.market_id

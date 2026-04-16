@@ -40,6 +40,13 @@ class AgentService:
         self.journal.log_event("discover_markets", {"count": len(markets)})
         return markets
 
+    def get_active_market_id(self) -> str:
+        market = self.polymarket.discover_active_market()
+        if not market:
+            raise RuntimeError("No active market matched the configured market family.")
+        self.journal.log_event("active_market", {"market_id": market.market_id})
+        return market.market_id
+
     def build_market_snapshot(self, market_id: str) -> MarketSnapshot:
         candidate = self.polymarket.get_market(market_id)
         orderbook = self.polymarket.get_orderbook_snapshot(candidate.yes_token_id)

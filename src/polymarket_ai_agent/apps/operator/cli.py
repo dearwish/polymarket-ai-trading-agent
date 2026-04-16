@@ -29,6 +29,14 @@ def _handle_operator_error(exc: Exception) -> None:
     raise exc
 
 
+def _resolve_market_id(service: AgentService, market_id: str, active: bool) -> str:
+    if market_id:
+        return market_id
+    if active:
+        return service.get_active_market_id()
+    raise ValueError("Provide a market_id or pass --active.")
+
+
 @app.command()
 def scan(limit: int = typer.Option(10, min=1, max=100)) -> None:
     try:
@@ -78,14 +86,18 @@ def analyze(market_id: str) -> None:
 
 
 @app.command()
-def paper(market_id: str) -> None:
+def paper(
+    market_id: str = typer.Argument("", help="Explicit market id to trade."),
+    active: bool = typer.Option(False, "--active"),
+) -> None:
     try:
         service = _service()
-        snapshot, assessment, decision, result = service.paper_trade(market_id)
+        resolved_market_id = _resolve_market_id(service, market_id, active)
+        snapshot, assessment, decision, result = service.paper_trade(resolved_market_id)
         console.print_json(
             json.dumps(
                 {
-                    "market_id": market_id,
+                    "market_id": resolved_market_id,
                     "question": snapshot.candidate.question,
                     "assessment": {
                         "fair_probability": assessment.fair_probability,
@@ -175,21 +187,23 @@ def report(session_id: str = "") -> None:
 
 @app.command("run-loop")
 def run_loop(
-    market_id: str,
+    market_id: str = typer.Argument("", help="Explicit market id to trade."),
+    active: bool = typer.Option(False, "--active"),
     iterations: int = typer.Option(1, min=1),
     interval_seconds: int = typer.Option(0, min=0),
 ) -> None:
     try:
         service = _service()
+        resolved_market_id = _resolve_market_id(service, market_id, active)
         cycles = []
         for idx in range(iterations):
-            cycles.append(service.run_cycle(market_id))
+            cycles.append(service.run_cycle(resolved_market_id))
             if idx < iterations - 1 and interval_seconds > 0:
                 time.sleep(interval_seconds)
         console.print_json(
             json.dumps(
                 {
-                    "market_id": market_id,
+                    "market_id": resolved_market_id,
                     "iterations": iterations,
                     "cycles": cycles,
                 }
