@@ -19,12 +19,16 @@ class DummyResponse:
 
 
 class DummyClient:
+    def __init__(self, content: str | None = None):
+        self.content = content
+
     def post(self, *args, **kwargs):
         payload = {
             "choices": [
                 {
                     "message": {
-                        "content": json.dumps(
+                        "content": self.content
+                        or json.dumps(
                             {
                                 "fair_probability": 0.61,
                                 "confidence": 0.84,
@@ -58,3 +62,70 @@ def test_scoring_engine_openrouter_path(settings, market_snapshot) -> None:
     assert assessment.fair_probability == 0.61
     assert assessment.confidence == 0.84
     assert assessment.suggested_side == SuggestedSide.YES
+
+
+def test_scoring_engine_invalid_json_abstains(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(configured, client=DummyClient(content="{not-json"))
+    assessment = engine.score_market(packet)
+    assert assessment.suggested_side == SuggestedSide.ABSTAIN
+    assert assessment.confidence == 0.0
+    assert assessment.edge == 0.0
+    assert "schema validation" in assessment.reasons_to_abstain[0].lower()
+
+
+def test_scoring_engine_missing_fields_abstains(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(
+        configured,
+        client=DummyClient(content=json.dumps({"fair_probability": 0.6, "confidence": 0.7})),
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.suggested_side == SuggestedSide.ABSTAIN
+    assert assessment.fair_probability == packet.market_probability
+
+
+def test_scoring_engine_bad_enum_abstains(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(
+        configured,
+        client=DummyClient(
+            content=json.dumps(
+                {
+                    "fair_probability": 0.61,
+                    "confidence": 0.84,
+                    "reasons_for_trade": ["Momentum and external price align."],
+                    "reasons_to_abstain": [],
+                    "expiry_risk": "LOW",
+                    "suggested_side": "MAYBE",
+                }
+            )
+        ),
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.suggested_side == SuggestedSide.ABSTAIN
+
+
+def test_scoring_engine_out_of_range_probability_abstains(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(
+        configured,
+        client=DummyClient(
+            content=json.dumps(
+                {
+                    "fair_probability": 1.5,
+                    "confidence": 0.84,
+                    "reasons_for_trade": ["Momentum and external price align."],
+                    "reasons_to_abstain": [],
+                    "expiry_risk": "LOW",
+                    "suggested_side": "YES",
+                }
+            )
+        ),
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.suggested_side == SuggestedSide.ABSTAIN

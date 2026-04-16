@@ -5,9 +5,19 @@ from dataclasses import asdict
 from textwrap import dedent
 
 import httpx
+from pydantic import BaseModel, Field, ValidationError
 
 from polymarket_ai_agent.config import Settings
 from polymarket_ai_agent.types import EvidencePacket, MarketAssessment, SuggestedSide
+
+
+class OpenRouterAssessment(BaseModel):
+    fair_probability: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reasons_for_trade: list[str]
+    reasons_to_abstain: list[str]
+    expiry_risk: str
+    suggested_side: SuggestedSide
 
 
 class ScoringEngine:
@@ -46,18 +56,20 @@ class ScoringEngine:
         response.raise_for_status()
         body = response.json()
         raw = body["choices"][0]["message"]["content"]
-        parsed = json.loads(raw)
-        side = SuggestedSide(parsed["suggested_side"])
-        fair = float(parsed["fair_probability"])
+        try:
+            parsed = OpenRouterAssessment.model_validate(json.loads(raw))
+        except (json.JSONDecodeError, ValidationError, KeyError, TypeError, ValueError) as exc:
+            return self._score_as_invalid_model_response(packet, raw, str(exc))
+        fair = float(parsed.fair_probability)
         edge = fair - packet.market_probability
         return MarketAssessment(
             market_id=packet.market_id,
             fair_probability=fair,
-            confidence=float(parsed["confidence"]),
-            suggested_side=side,
-            expiry_risk=str(parsed["expiry_risk"]),
-            reasons_for_trade=list(parsed["reasons_for_trade"]),
-            reasons_to_abstain=list(parsed["reasons_to_abstain"]),
+            confidence=float(parsed.confidence),
+            suggested_side=parsed.suggested_side,
+            expiry_risk=str(parsed.expiry_risk),
+            reasons_for_trade=list(parsed.reasons_for_trade),
+            reasons_to_abstain=list(parsed.reasons_to_abstain),
             edge=edge,
             raw_model_output=raw,
         )
@@ -93,4 +105,25 @@ class ScoringEngine:
             reasons_to_abstain=reasons_to_abstain,
             edge=edge,
             raw_model_output="heuristic-fallback",
+        )
+
+    def _score_as_invalid_model_response(
+        self,
+        packet: EvidencePacket,
+        raw_model_output: str,
+        error_detail: str,
+    ) -> MarketAssessment:
+        return MarketAssessment(
+            market_id=packet.market_id,
+            fair_probability=packet.market_probability,
+            confidence=0.0,
+            suggested_side=SuggestedSide.ABSTAIN,
+            expiry_risk="UNKNOWN",
+            reasons_for_trade=[],
+            reasons_to_abstain=[
+                "Model response failed schema validation.",
+                f"Validation detail: {error_detail}",
+            ],
+            edge=0.0,
+            raw_model_output=raw_model_output,
         )
