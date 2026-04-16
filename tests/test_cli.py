@@ -66,6 +66,19 @@ class StubService:
         )
         return snapshot, assessment, decision, result
 
+    def simulate_market(self, market_id):
+        snapshot, assessment = self.analyze_market(market_id)
+        decision = TradeDecision(
+            market_id=market_id,
+            status=DecisionStatus.APPROVED,
+            side=SuggestedSide.YES,
+            size_usd=10.0,
+            limit_price=0.52,
+            rationale=["simulated"],
+            rejected_by=[],
+        )
+        return snapshot, assessment, decision
+
     def status(self):
         return {"trading_mode": "paper", "open_positions": 0}
 
@@ -113,6 +126,17 @@ class StubService:
             },
         }
 
+    def run_simulation_cycle(self, market_id: str):
+        return {
+            "market_id": market_id,
+            "decision_status": "APPROVED",
+            "decision_side": "YES",
+            "limit_price": 0.52,
+            "size_usd": 10.0,
+            "rejected_by": [],
+            "readonly": True,
+        }
+
     def get_active_market_id(self):
         return "active-123"
 
@@ -129,6 +153,14 @@ def test_cli_auth_check(monkeypatch) -> None:
     result = runner.invoke(app, ["auth-check"])
     assert result.exit_code == 0
     assert "readonly_ready" in result.stdout
+
+
+def test_cli_simulate(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["simulate", "123"])
+    assert result.exit_code == 0
+    assert "\"readonly\": true" in result.stdout
+    assert "\"market_id\": \"123\"" in result.stdout
 
 
 def test_cli_scan(monkeypatch) -> None:
@@ -182,6 +214,14 @@ def test_cli_run_loop(monkeypatch) -> None:
     assert "\"iterations_completed\": 2" in result.stdout
 
 
+def test_cli_simulate_loop(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["simulate-loop", "123", "--iterations", "2", "--interval-seconds", "0"])
+    assert result.exit_code == 0
+    assert "\"readonly\": true" in result.stdout
+    assert "\"iterations_completed\": 2" in result.stdout
+
+
 def test_cli_paper_with_active_market(monkeypatch) -> None:
     monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
     result = runner.invoke(app, ["paper", "--active"])
@@ -189,9 +229,23 @@ def test_cli_paper_with_active_market(monkeypatch) -> None:
     assert "active-123" in result.stdout
 
 
+def test_cli_simulate_with_active_market(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["simulate", "--active"])
+    assert result.exit_code == 0
+    assert "active-123" in result.stdout
+
+
 def test_cli_run_loop_with_active_market(monkeypatch) -> None:
     monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
     result = runner.invoke(app, ["run-loop", "--active", "--iterations", "1", "--interval-seconds", "0"])
+    assert result.exit_code == 0
+    assert "active-123" in result.stdout
+
+
+def test_cli_simulate_loop_with_active_market(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["simulate-loop", "--active", "--iterations", "1", "--interval-seconds", "0"])
     assert result.exit_code == 0
     assert "active-123" in result.stdout
 
@@ -219,5 +273,12 @@ def test_cli_run_loop_stops_early_on_safety_stop(monkeypatch) -> None:
 def test_cli_paper_requires_market_or_active(monkeypatch) -> None:
     monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
     result = runner.invoke(app, ["paper"])
+    assert result.exit_code == 1
+    assert "Provide a market_id or pass --active." in result.stdout
+
+
+def test_cli_simulate_requires_market_or_active(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["simulate"])
     assert result.exit_code == 1
     assert "Provide a market_id or pass --active." in result.stdout

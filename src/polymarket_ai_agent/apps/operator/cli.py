@@ -126,6 +126,41 @@ def paper(
 
 
 @app.command()
+def simulate(
+    market_id: str = typer.Argument("", help="Explicit market id to simulate."),
+    active: bool = typer.Option(False, "--active"),
+) -> None:
+    try:
+        service = _service()
+        resolved_market_id = _resolve_market_id(service, market_id, active)
+        snapshot, assessment, decision = service.simulate_market(resolved_market_id)
+        console.print_json(
+            json.dumps(
+                {
+                    "market_id": resolved_market_id,
+                    "readonly": True,
+                    "question": snapshot.candidate.question,
+                    "assessment": {
+                        "fair_probability": assessment.fair_probability,
+                        "confidence": assessment.confidence,
+                        "edge": assessment.edge,
+                        "suggested_side": assessment.suggested_side.value,
+                    },
+                    "decision": {
+                        "status": decision.status.value,
+                        "side": decision.side.value,
+                        "size_usd": decision.size_usd,
+                        "limit_price": decision.limit_price,
+                        "rejected_by": decision.rejected_by,
+                    },
+                }
+            )
+        )
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
+@app.command()
 def status() -> None:
     try:
         service = _service()
@@ -217,6 +252,42 @@ def run_loop(
             json.dumps(
                 {
                     "market_id": resolved_market_id,
+                    "iterations_requested": iterations,
+                    "iterations_completed": len(cycles),
+                    "stopped_early": bool(stop_reason),
+                    "stop_reason": stop_reason,
+                    "cycles": cycles,
+                }
+            )
+        )
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
+@app.command("simulate-loop")
+def simulate_loop(
+    market_id: str = typer.Argument("", help="Explicit market id to simulate."),
+    active: bool = typer.Option(False, "--active"),
+    iterations: int = typer.Option(1, min=1),
+    interval_seconds: int = typer.Option(0, min=0),
+) -> None:
+    try:
+        service = _service()
+        resolved_market_id = _resolve_market_id(service, market_id, active)
+        cycles = []
+        stop_reason = service.safety_stop_reason()
+        for idx in range(iterations):
+            if stop_reason:
+                break
+            cycles.append(service.run_simulation_cycle(resolved_market_id))
+            stop_reason = service.safety_stop_reason()
+            if idx < iterations - 1 and interval_seconds > 0:
+                time.sleep(interval_seconds)
+        console.print_json(
+            json.dumps(
+                {
+                    "market_id": resolved_market_id,
+                    "readonly": True,
                     "iterations_requested": iterations,
                     "iterations_completed": len(cycles),
                     "stopped_early": bool(stop_reason),

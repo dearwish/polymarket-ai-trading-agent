@@ -91,6 +91,13 @@ class AgentService:
         self.journal.log_event("execution_result", result)
         return snapshot, assessment, decision, result
 
+    def simulate_market(self, market_id: str):
+        snapshot, assessment = self.analyze_market(market_id)
+        account_state = self.portfolio.get_account_state(ExecutionMode.PAPER)
+        decision = self.risk.decide_trade(snapshot, assessment, account_state)
+        self.journal.log_event("simulation_decision", decision)
+        return snapshot, assessment, decision
+
     def run_cycle(self, market_id: str) -> dict:
         actions = self.manage_open_positions()
         snapshot, assessment, decision, result = self.paper_trade(market_id)
@@ -109,6 +116,21 @@ class AgentService:
             },
         }
         self.journal.log_event("cycle_result", cycle)
+        return cycle
+
+    def run_simulation_cycle(self, market_id: str) -> dict:
+        snapshot, assessment, decision = self.simulate_market(market_id)
+        cycle = {
+            "market_id": snapshot.candidate.market_id,
+            "question": snapshot.candidate.question,
+            "decision_status": decision.status.value,
+            "decision_side": decision.side.value,
+            "limit_price": decision.limit_price,
+            "size_usd": decision.size_usd,
+            "rejected_by": decision.rejected_by,
+            "readonly": True,
+        }
+        self.journal.log_event("simulation_cycle", cycle)
         return cycle
 
     def manage_open_positions(self) -> list[PositionAction]:

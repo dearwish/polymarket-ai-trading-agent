@@ -72,6 +72,25 @@ def test_agent_service_paper_trade(settings, market_snapshot, market_assessment)
     assert recorded["called"]
 
 
+def test_agent_service_simulate_market_is_readonly(settings, market_snapshot, market_assessment) -> None:
+    service = AgentService(settings)
+    service.analyze_market = lambda market_id: (market_snapshot, market_assessment)
+    service.risk.decide_trade = lambda snapshot, assessment, account_state: TradeDecision(
+        market_id="123",
+        status=DecisionStatus.APPROVED,
+        side=assessment.suggested_side,
+        size_usd=10.0,
+        limit_price=0.52,
+        rationale=["approved"],
+        rejected_by=[],
+    )
+    called = {"record_execution": False}
+    service.portfolio.record_execution = lambda decision, result: called.__setitem__("record_execution", True)
+    _, _, decision = service.simulate_market("123")
+    assert decision.status == DecisionStatus.APPROVED
+    assert called["record_execution"] is False
+
+
 def test_agent_service_generates_report(settings) -> None:
     service = AgentService(settings)
     report = service.generate_operator_report("session-abc")
@@ -168,6 +187,28 @@ def test_agent_service_run_cycle(settings, market_snapshot, market_assessment) -
     assert cycle["paper_trade"]["decision_status"] == "APPROVED"
     assert cycle["paper_trade"]["execution_status"] == "FILLED_PAPER"
     assert cycle["paper_trade"]["fill_price"] == 0.53
+
+
+def test_agent_service_run_simulation_cycle(settings, market_snapshot, market_assessment) -> None:
+    service = AgentService(settings)
+    service.simulate_market = lambda market_id: (
+        market_snapshot,
+        market_assessment,
+        type(
+            "Decision",
+            (),
+            {
+                "status": type("Status", (), {"value": "APPROVED"})(),
+                "side": type("Side", (), {"value": "YES"})(),
+                "limit_price": 0.52,
+                "size_usd": 10.0,
+                "rejected_by": [],
+            },
+        )(),
+    )
+    cycle = service.run_simulation_cycle("123")
+    assert cycle["decision_status"] == "APPROVED"
+    assert cycle["readonly"] is True
 
 
 def test_agent_service_get_active_market_id(settings, market_candidate) -> None:
