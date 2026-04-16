@@ -94,7 +94,7 @@ class AgentService:
     def run_cycle(self, market_id: str) -> dict:
         actions = self.manage_open_positions()
         snapshot, assessment, decision, result = self.paper_trade(market_id)
-        return {
+        cycle = {
             "managed_actions": [
                 {"market_id": action.market_id, "action": action.action, "reason": action.reason}
                 for action in actions
@@ -105,8 +105,11 @@ class AgentService:
                 "decision_side": decision.side.value,
                 "execution_status": result.status,
                 "execution_success": result.success,
+                "fill_price": result.fill_price,
             },
         }
+        self.journal.log_event("cycle_result", cycle)
+        return cycle
 
     def manage_open_positions(self) -> list[PositionAction]:
         actions: list[PositionAction] = []
@@ -149,9 +152,16 @@ class AgentService:
 
     def generate_operator_report(self, session_id: str | None = None) -> Report:
         reports = self.journal.read_reports()
+        recent_events = self.journal.read_recent_events(limit=10)
         open_positions = self.portfolio.list_open_positions()
         closed_positions = self.portfolio.list_closed_positions(limit=5)
         items = [f"{row[2]} | {row[0]} | {row[1]}" for row in reports]
+        items.extend(
+            [
+                f"EVENT | {event['logged_at']} | {event['event_type']} | {self._format_event_payload(event['payload'])}"
+                for event in recent_events
+            ]
+        )
         items.extend(
             [
                 f"OPEN | {position.market_id} | {position.side.value} | size={position.size_usd:.2f} | entry={position.entry_price:.4f}"
@@ -174,6 +184,16 @@ class AgentService:
         )
         self.journal.save_report(report.session_id, report.summary)
         return report
+
+    @staticmethod
+    def _format_event_payload(payload: dict) -> str:
+        if "market_id" in payload:
+            return f"market_id={payload['market_id']}"
+        if "count" in payload:
+            return f"count={payload['count']}"
+        if "paper_trade" in payload:
+            return f"paper_trade_status={payload['paper_trade'].get('execution_status', 'unknown')}"
+        return ",".join(sorted(payload.keys()))[:120]
 
     def status(self) -> dict:
         auth_status = self.polymarket.get_auth_status()

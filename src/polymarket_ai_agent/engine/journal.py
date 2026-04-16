@@ -33,6 +33,17 @@ class Journal:
             )
             conn.commit()
 
+    def read_recent_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        if not self.events_path.exists():
+            return []
+        events: list[dict[str, Any]] = []
+        lines = self.events_path.read_text(encoding="utf-8").splitlines()
+        for line in lines[-limit:]:
+            if not line.strip():
+                continue
+            events.append(json.loads(line))
+        return events
+
     def read_reports(self) -> list[tuple[str, str, str]]:
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(

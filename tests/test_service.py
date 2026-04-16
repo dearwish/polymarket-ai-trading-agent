@@ -141,8 +141,10 @@ def test_agent_service_report_includes_portfolio_summaries(settings) -> None:
 
     service.portfolio.list_open_positions = lambda: [OpenPosition()]
     service.portfolio.list_closed_positions = lambda limit=5: [ClosedPosition()]
+    service.journal.log_event("execution_result", {"market_id": "open-1"})
     report = service.generate_operator_report("session-portfolio")
     assert "Open positions: 1" in report.summary
+    assert any("EVENT |" in item for item in report.items)
     assert any("OPEN | open-1" in item for item in report.items)
     assert any("CLOSED | closed-1" in item for item in report.items)
 
@@ -154,11 +156,12 @@ def test_agent_service_run_cycle(settings, market_snapshot, market_assessment) -
         market_snapshot,
         market_assessment,
         type("Decision", (), {"status": type("Status", (), {"value": "APPROVED"})(), "side": type("Side", (), {"value": "YES"})()})(),
-        type("Result", (), {"status": "FILLED_PAPER", "success": True})(),
+        type("Result", (), {"status": "FILLED_PAPER", "success": True, "fill_price": 0.53})(),
     )
     cycle = service.run_cycle("123")
     assert cycle["paper_trade"]["decision_status"] == "APPROVED"
     assert cycle["paper_trade"]["execution_status"] == "FILLED_PAPER"
+    assert cycle["paper_trade"]["fill_price"] == 0.53
 
 
 def test_agent_service_get_active_market_id(settings, market_candidate) -> None:

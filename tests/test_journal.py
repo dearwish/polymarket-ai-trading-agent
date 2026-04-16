@@ -15,6 +15,9 @@ def test_journal_logs_event_and_reads_reports(settings) -> None:
     assert parsed["event_type"] == "test_event"
     assert parsed["payload"]["hello"] == "world"
 
+    events = journal.read_recent_events(limit=5)
+    assert events[0]["event_type"] == "test_event"
+
     reports = journal.read_reports()
     assert reports[0][0] == "session-1"
     assert reports[0][1] == "first summary"
