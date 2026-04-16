@@ -9,7 +9,7 @@ CLI := $(BIN)/polymarket-ai-agent
 ITERATIONS ?= 10
 INTERVAL ?= 15
 
-.PHONY: help venv install bootstrap test status auth-check check report \
+.PHONY: help venv install bootstrap reinstall bootstrap-force test status auth-check check report \
 	simulate-active simulate-market simulate-loop-active simulate-loop-market \
 	guard-market-id
 
@@ -25,6 +25,12 @@ venv: $(BIN)/python
 install: $(VENV)/.installed
 
 bootstrap: install
+
+reinstall: $(BIN)/python
+	$(PIP) install -e ".[dev]"
+	@touch $(VENV)/.installed
+
+bootstrap-force: reinstall
 
 test: install
 	$(PYTEST)
@@ -64,6 +70,8 @@ help:
 		'  make venv                     Create the local virtual environment' \
 		'  make install                  Install the package and dev dependencies' \
 		'  make bootstrap                Create the venv and install dependencies' \
+		'  make reinstall                Force reinstall the package and dev dependencies' \
+		'  make bootstrap-force          Force bootstrap to reinstall dependencies' \
 		'  make test                     Run the full pytest suite' \
 		'  make status                   Run the CLI status command' \
 		'  make auth-check               Run the CLI auth-check command' \
