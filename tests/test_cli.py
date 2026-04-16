@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 from typer.testing import CliRunner
 
 from polymarket_ai_agent.apps.operator.cli import app
@@ -103,3 +104,25 @@ def test_cli_manage(monkeypatch) -> None:
     result = runner.invoke(app, ["manage"])
     assert result.exit_code == 0
     assert "ttl_expired" in result.stdout
+
+
+def test_cli_scan_handles_http_errors(monkeypatch) -> None:
+    class FailingService(StubService):
+        def discover_markets(self):
+            raise httpx.ConnectError("dns failed")
+
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: FailingService())
+    result = runner.invoke(app, ["scan", "--limit", "1"])
+    assert result.exit_code == 1
+    assert "Request failed" in result.stdout
+
+
+def test_cli_analyze_handles_runtime_errors(monkeypatch) -> None:
+    class FailingService(StubService):
+        def analyze_market(self, market_id):
+            raise RuntimeError("market data unavailable")
+
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: FailingService())
+    result = runner.invoke(app, ["analyze", "123"])
+    assert result.exit_code == 1
+    assert "Operation failed" in result.stdout
