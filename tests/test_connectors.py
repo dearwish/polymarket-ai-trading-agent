@@ -238,3 +238,71 @@ def test_polymarket_connector_captures_probe_errors(settings) -> None:
     assert auth.probe_attempted
     assert not auth.readonly_ready
     assert auth.errors == ["boom"]
+
+
+def test_polymarket_connector_discovers_btc_daily_threshold_markets(settings) -> None:
+    configured = settings.model_copy(update={"market_family": "btc_daily_threshold"})
+    payload = [
+        {
+            "id": "daily",
+            "question": "Will the price of Bitcoin be above $82,000 on April 17?",
+            "conditionId": "cond-daily",
+            "slug": "bitcoin-above-82k-on-april-17",
+            "endDate": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+            "clobTokenIds": '["yes-daily","no-daily"]',
+            "outcomePrices": "[0.55,0.45]",
+            "liquidityNum": 1000,
+            "volume24hr": 5000,
+            "description": "This market will resolve to yes if BTC is above the threshold on April 17.",
+        },
+        {
+            "id": "monthly",
+            "question": "Will Bitcoin reach $90,000 in April?",
+            "conditionId": "cond-monthly",
+            "slug": "will-bitcoin-reach-90k-in-april-2026",
+            "endDate": (datetime.now(timezone.utc) + timedelta(days=14)).isoformat(),
+            "clobTokenIds": '["yes-monthly","no-monthly"]',
+            "outcomePrices": "[0.40,0.60]",
+            "liquidityNum": 4000,
+            "volume24hr": 7000,
+            "description": "This market will immediately resolve if BTC reaches the level during the month.",
+        },
+    ]
+    connector = PolymarketConnector(configured, client=DummyClient([payload]))
+    markets = connector.discover_markets()
+    assert len(markets) == 1
+    assert markets[0].market_id == "daily"
+
+
+def test_polymarket_connector_prefers_active_btc_daily_threshold_market(settings) -> None:
+    configured = settings.model_copy(update={"market_family": "btc_daily_threshold"})
+    payload = [
+        {
+            "id": "near-daily",
+            "question": "Will the price of Bitcoin be above $82,000 on April 17?",
+            "conditionId": "cond-near",
+            "slug": "bitcoin-above-82k-on-april-17",
+            "endDate": (datetime.now(timezone.utc) + timedelta(hours=8)).isoformat(),
+            "clobTokenIds": '["yes-near","no-near"]',
+            "outcomePrices": "[0.55,0.45]",
+            "liquidityNum": 1000,
+            "volume24hr": 5000,
+            "description": "Daily threshold market.",
+        },
+        {
+            "id": "far-daily",
+            "question": "Will the price of Bitcoin be above $72,000 on April 18?",
+            "conditionId": "cond-far",
+            "slug": "bitcoin-above-72k-on-april-18",
+            "endDate": (datetime.now(timezone.utc) + timedelta(hours=30)).isoformat(),
+            "clobTokenIds": '["yes-far","no-far"]',
+            "outcomePrices": "[0.51,0.49]",
+            "liquidityNum": 5000,
+            "volume24hr": 9000,
+            "description": "Daily threshold market.",
+        },
+    ]
+    connector = PolymarketConnector(configured, client=DummyClient([payload]))
+    market = connector.discover_active_market()
+    assert market is not None
+    assert market.market_id == "near-daily"

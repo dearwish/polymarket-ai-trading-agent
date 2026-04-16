@@ -17,9 +17,10 @@ class PolymarketConnector:
         self.client = client or httpx.Client(timeout=20)
 
     def discover_markets(self, limit: int = 25) -> list[MarketCandidate]:
+        request_limit = self._discovery_request_limit(limit)
         params = {
             "closed": "false",
-            "limit": limit,
+            "limit": request_limit,
             "order": "volume24hr",
             "ascending": "false",
         }
@@ -31,11 +32,12 @@ class PolymarketConnector:
 
     def discover_active_market(self, limit: int = 50) -> MarketCandidate | None:
         markets = self.discover_markets(limit=limit)
-        if self.settings.market_family == "btc_5m":
+        max_expiry_seconds = self._active_market_max_expiry_seconds()
+        if max_expiry_seconds is not None:
             markets = [
                 market
                 for market in markets
-                if 0 < self.estimate_seconds_to_expiry(market.end_date_iso) <= 20 * 60
+                if 0 < self.estimate_seconds_to_expiry(market.end_date_iso) <= max_expiry_seconds
             ]
         return markets[0] if markets else None
 
@@ -126,7 +128,7 @@ class PolymarketConnector:
         if len(token_ids) < 2:
             return None
         question = item.get("question") or ""
-        if self.settings.market_family == "btc_5m" and not self._matches_btc_5m_market(item):
+        if not self._matches_market_family(item):
             return None
         yes_price, no_price = self._parse_outcome_prices(item.get("outcomePrices"))
         implied = yes_price if yes_price else 0.5
@@ -148,10 +150,10 @@ class PolymarketConnector:
         def sort_key(candidate: MarketCandidate) -> tuple[int, float, float]:
             seconds_to_expiry = PolymarketConnector._seconds_to_expiry(candidate.end_date_iso)
             effective_expiry = seconds_to_expiry if seconds_to_expiry >= 0 else 10**9
-            family_score = (
-                self._btc_5m_match_score(candidate.question, candidate.resolution_source, candidate.slug)
-                if self.settings.market_family == "btc_5m"
-                else 0
+            family_score = self._market_family_score(
+                candidate.question,
+                candidate.resolution_source,
+                candidate.slug,
             )
             return (-family_score, effective_expiry, -candidate.volume_24h_usd, -candidate.liquidity_usd)
 
@@ -165,16 +167,39 @@ class PolymarketConnector:
             return -1
         return int((expiry - datetime.now(timezone.utc)).total_seconds())
 
-    @classmethod
-    def _matches_btc_5m_market(cls, item: dict[str, Any]) -> bool:
-        return (
-            cls._btc_5m_match_score(
+    def _matches_market_family(self, item: dict[str, Any]) -> bool:
+        if self.settings.market_family == "btc_5m":
+            return self._market_family_score(
                 str(item.get("question") or ""),
                 str(item.get("description") or ""),
                 str(item.get("slug") or ""),
-            )
-            >= 3
-        )
+            ) >= 3
+        if self.settings.market_family == "btc_daily_threshold":
+            return self._market_family_score(
+                str(item.get("question") or ""),
+                str(item.get("description") or ""),
+                str(item.get("slug") or ""),
+            ) >= 4
+        return True
+
+    def _market_family_score(self, question: str, description: str, slug: str) -> int:
+        if self.settings.market_family == "btc_5m":
+            return self._btc_5m_match_score(question, description, slug)
+        if self.settings.market_family == "btc_daily_threshold":
+            return self._btc_daily_threshold_match_score(question, description, slug)
+        return 0
+
+    def _active_market_max_expiry_seconds(self) -> int | None:
+        if self.settings.market_family == "btc_5m":
+            return 20 * 60
+        if self.settings.market_family == "btc_daily_threshold":
+            return 48 * 60 * 60
+        return None
+
+    def _discovery_request_limit(self, requested_limit: int) -> int:
+        if self.settings.market_family in {"btc_5m", "btc_daily_threshold"}:
+            return max(requested_limit, 200)
+        return requested_limit
 
     @staticmethod
     def _btc_5m_match_score(question: str, description: str, slug: str) -> int:
@@ -201,6 +226,56 @@ class PolymarketConnector:
             score += 1
         if has_direction:
             score += 2
+        return score
+
+    @staticmethod
+    def _btc_daily_threshold_match_score(question: str, description: str, slug: str) -> int:
+        joined = " ".join([question, description, slug]).lower()
+        has_btc = "bitcoin" in joined or "btc" in joined
+        if not has_btc:
+            return 0
+        has_threshold = any(
+            phrase in joined
+            for phrase in (
+                "above $",
+                "below $",
+                "reach $",
+                "dip to $",
+                "price of bitcoin be above",
+                "price of bitcoin be below",
+            )
+        )
+        has_daily_timeframe = any(
+            phrase in joined
+            for phrase in (
+                "on april",
+                "on may",
+                "on june",
+                "today",
+                "tomorrow",
+                "this week",
+            )
+        ) or re.search(r"\bon [a-z]+ \d{1,2}\b", joined) is not None
+        has_monthly_timeframe = any(
+            phrase in joined
+            for phrase in (
+                "in april",
+                "in may",
+                "in june",
+                "this month",
+                "during the month",
+                "by the end of the month",
+            )
+        )
+        score = 0
+        if has_btc:
+            score += 1
+        if has_threshold:
+            score += 2
+        if has_daily_timeframe:
+            score += 2
+        if has_monthly_timeframe:
+            score -= 1
         return score
 
     @staticmethod
