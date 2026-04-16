@@ -99,6 +99,22 @@ def status() -> None:
 
 
 @app.command()
+def manage() -> None:
+    service = _service()
+    actions = service.manage_open_positions()
+    console.print_json(
+        json.dumps(
+            {
+                "actions": [
+                    {"market_id": action.market_id, "action": action.action, "reason": action.reason}
+                    for action in actions
+                ]
+            }
+        )
+    )
+
+
+@app.command()
 def report(session_id: str = "") -> None:
     service = _service()
     generated = service.generate_operator_report(session_id or None)

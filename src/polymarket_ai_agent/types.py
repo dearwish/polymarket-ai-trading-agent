@@ -133,8 +133,13 @@ class PositionRecord:
     side: SuggestedSide
     size_usd: float
     entry_price: float
+    order_id: str = ""
     opened_at: datetime = field(default_factory=utc_now)
     status: str = "OPEN"
+    close_reason: str = ""
+    closed_at: datetime | None = None
+    exit_price: float = 0.0
+    realized_pnl: float = 0.0
 
 
 @dataclass(slots=True)

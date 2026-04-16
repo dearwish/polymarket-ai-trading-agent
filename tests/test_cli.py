@@ -66,7 +66,7 @@ class StubService:
         return snapshot, assessment, decision, result
 
     def status(self):
-        return {"trading_mode": "paper"}
+        return {"trading_mode": "paper", "open_positions": 0}
 
     def generate_operator_report(self, session_id=None):
         class Report:
@@ -74,6 +74,14 @@ class StubService:
             items = ["item-1"]
 
         return Report()
+
+    def manage_open_positions(self):
+        class Action:
+            market_id = "123"
+            action = "CLOSE"
+            reason = "ttl_expired"
+
+        return [Action()]
 
 
 def test_cli_status(monkeypatch) -> None:
@@ -88,3 +96,10 @@ def test_cli_scan(monkeypatch) -> None:
     result = runner.invoke(app, ["scan", "--limit", "1"])
     assert result.exit_code == 0
     assert "Discovered Markets" in result.stdout
+
+
+def test_cli_manage(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["manage"])
+    assert result.exit_code == 0
+    assert "ttl_expired" in result.stdout

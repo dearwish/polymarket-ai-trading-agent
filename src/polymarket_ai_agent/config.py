@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     max_daily_loss_usd: float = 25.0
     stale_data_seconds: int = 30
     max_rejected_orders: int = 3
+    paper_starting_balance_usd: float = 100.0
+    paper_position_ttl_seconds: int = 60
 
     data_dir: Path = Field(default=Path("data"))
     log_dir: Path = Field(default=Path("logs"))

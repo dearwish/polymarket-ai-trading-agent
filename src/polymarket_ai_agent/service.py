@@ -7,6 +7,7 @@ from polymarket_ai_agent.connectors.external_feeds import ExternalFeedConnector
 from polymarket_ai_agent.connectors.polymarket import PolymarketConnector
 from polymarket_ai_agent.engine.execution import ExecutionEngine
 from polymarket_ai_agent.engine.journal import Journal
+from polymarket_ai_agent.engine.portfolio import PortfolioEngine
 from polymarket_ai_agent.engine.research import ResearchEngine
 from polymarket_ai_agent.engine.risk import RiskEngine
 from polymarket_ai_agent.engine.scoring import ScoringEngine
@@ -16,8 +17,8 @@ from polymarket_ai_agent.types import (
     MarketAssessment,
     MarketSnapshot,
     OrderBookSnapshot,
+    PositionAction,
     Report,
-    SuggestedSide,
     utc_now,
 )
 
@@ -32,6 +33,7 @@ class AgentService:
         self.risk = RiskEngine(settings)
         self.execution = ExecutionEngine(ExecutionMode(settings.trading_mode))
         self.journal = Journal(settings.db_path, settings.events_path)
+        self.portfolio = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
 
     def discover_markets(self):
         markets = self.polymarket.discover_markets()
@@ -71,17 +73,27 @@ class AgentService:
 
     def paper_trade(self, market_id: str):
         snapshot, assessment = self.analyze_market(market_id)
-        account_state = AccountState(
-            mode=ExecutionMode.PAPER,
-            available_usd=self.settings.max_position_usd * 10,
-            open_positions=0,
-            daily_realized_pnl=0.0,
-        )
+        account_state = self.portfolio.get_account_state(ExecutionMode.PAPER)
         decision = self.risk.decide_trade(snapshot, assessment, account_state)
         self.journal.log_event("trade_decision", decision)
         result = self.execution.execute_trade(decision)
+        self.portfolio.record_execution(decision, result)
         self.journal.log_event("execution_result", result)
         return snapshot, assessment, decision, result
+
+    def manage_open_positions(self) -> list[PositionAction]:
+        actions: list[PositionAction] = []
+        due_positions = self.portfolio.positions_due_for_close(self.settings.paper_position_ttl_seconds)
+        for position in due_positions:
+            snapshot = self.build_market_snapshot(position.market_id)
+            action = self.portfolio.close_position(
+                position.market_id,
+                exit_price=snapshot.orderbook.midpoint,
+                reason="ttl_expired",
+            )
+            self.journal.log_event("position_action", action)
+            actions.append(action)
+        return actions
 
     def generate_operator_report(self, session_id: str | None = None) -> Report:
         reports = self.journal.read_reports()
@@ -105,4 +117,6 @@ class AgentService:
             "openrouter_configured": bool(self.settings.openrouter_api_key),
             "db_path": str(self.settings.db_path),
             "events_path": str(self.settings.events_path),
+            "open_positions": len(self.portfolio.list_open_positions()),
+            "paper_position_ttl_seconds": self.settings.paper_position_ttl_seconds,
         }
