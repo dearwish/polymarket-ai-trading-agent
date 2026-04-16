@@ -139,3 +139,36 @@ def test_portfolio_daily_realized_pnl_ignores_previous_days(settings) -> None:
     account_state = engine.get_account_state(ExecutionMode.PAPER)
     assert account_state.daily_realized_pnl == 0.0
     assert engine.get_total_realized_pnl() == -2.0
+
+
+def test_portfolio_counts_rejected_orders_without_counting_skips(settings) -> None:
+    engine = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
+    decision = TradeDecision(
+        market_id="123",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.52,
+        rationale=["approved"],
+        rejected_by=[],
+    )
+    failed_result = ExecutionResult(
+        market_id="123",
+        success=False,
+        mode=ExecutionMode.LIVE,
+        order_id="live-1",
+        status="NOT_IMPLEMENTED",
+        detail="disabled",
+    )
+    skipped_result = ExecutionResult(
+        market_id="124",
+        success=False,
+        mode=ExecutionMode.PAPER,
+        order_id="paper-2",
+        status="SKIPPED",
+        detail="not approved",
+    )
+    engine.record_execution(decision, failed_result)
+    engine.record_execution(decision, skipped_result)
+    account_state = engine.get_account_state(ExecutionMode.PAPER)
+    assert account_state.rejected_orders == 1

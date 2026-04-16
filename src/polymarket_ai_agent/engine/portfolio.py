@@ -30,13 +30,14 @@ class PortfolioEngine:
         open_positions = self.list_open_positions()
         realized_pnl = self.get_total_realized_pnl()
         daily_realized_pnl = self.get_daily_realized_pnl(now=now)
+        rejected_orders = self.get_rejected_orders(now=now)
         reserved = sum(position.size_usd for position in open_positions)
         return AccountState(
             mode=mode,
             available_usd=self.starting_balance_usd + realized_pnl - reserved,
             open_positions=len(open_positions),
             daily_realized_pnl=daily_realized_pnl,
-            rejected_orders=0,
+            rejected_orders=rejected_orders,
         )
 
     def get_total_realized_pnl(self) -> float:
@@ -62,10 +63,26 @@ class PortfolioEngine:
         return float(row[0] or 0.0)
 
     def record_execution(self, decision: TradeDecision, result: ExecutionResult) -> None:
-        if not result.success or result.status != "FILLED_PAPER":
-            return
         entry_price = result.fill_price if result.fill_price > 0 else decision.limit_price
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                insert into order_attempts(
+                    market_id, success, counted_rejection, status, detail, recorded_at
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision.market_id,
+                    1 if result.success else 0,
+                    1 if (not result.success and result.status != "SKIPPED") else 0,
+                    result.status,
+                    result.detail,
+                    result.executed_at.isoformat(),
+                ),
+            )
+            if not result.success or result.status != "FILLED_PAPER":
+                conn.commit()
+                return
             conn.execute(
                 """
                 insert into positions(
@@ -88,6 +105,20 @@ class PortfolioEngine:
                 ),
             )
             conn.commit()
+
+    def get_rejected_orders(self, now: datetime | None = None) -> int:
+        current = now or _utc_now()
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                select count(*)
+                from order_attempts
+                where counted_rejection = 1
+                  and substr(recorded_at, 1, 10) = ?
+                """,
+                (current.date().isoformat(),),
+            ).fetchone()
+        return int(row[0] or 0)
 
     def list_open_positions(self) -> list[PositionRecord]:
         with sqlite3.connect(self.db_path) as conn:
@@ -210,6 +241,18 @@ class PortfolioEngine:
                     closed_at text,
                     exit_price real,
                     realized_pnl real not null default 0.0
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists order_attempts (
+                    market_id text not null,
+                    success integer not null,
+                    counted_rejection integer not null,
+                    status text not null,
+                    detail text not null,
+                    recorded_at text not null
                 )
                 """
             )

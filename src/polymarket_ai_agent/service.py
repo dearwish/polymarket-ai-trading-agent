@@ -208,6 +208,7 @@ class AgentService:
             "open_positions": account_state.open_positions,
             "available_usd": account_state.available_usd,
             "daily_realized_pnl": account_state.daily_realized_pnl,
+            "rejected_orders": account_state.rejected_orders,
             "daily_loss_limit_reached": account_state.daily_realized_pnl <= -self.settings.max_daily_loss_usd,
             "paper_position_ttl_seconds": self.settings.paper_position_ttl_seconds,
             "auth": {
