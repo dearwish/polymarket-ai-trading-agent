@@ -99,7 +99,3 @@ Avoid for v1:
 - multi-region active-active deployment
 
 Those models add failure modes and complexity before the trading logic is validated.
-
-## GitHub Status
-
-The local scaffold is ready for review. Public GitHub repo creation is currently blocked because the local `gh` authentication for `dearwish` is invalid in this session.
