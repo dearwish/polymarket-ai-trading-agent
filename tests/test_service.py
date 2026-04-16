@@ -20,6 +20,7 @@ def test_agent_service_status(settings) -> None:
     assert "daily_realized_pnl" in status
     assert "rejected_orders" in status
     assert "daily_loss_limit_reached" in status
+    assert "safety_stop_reason" in status
     assert "auth" in status
 
 
@@ -171,3 +172,15 @@ def test_agent_service_get_active_market_id(settings, market_candidate) -> None:
     service = AgentService(settings)
     service.polymarket.discover_active_market = lambda: market_candidate
     assert service.get_active_market_id() == market_candidate.market_id
+
+
+def test_agent_service_safety_stop_reason(settings) -> None:
+    service = AgentService(settings)
+    account_state = AccountState(
+        mode=ExecutionMode.PAPER,
+        available_usd=100.0,
+        open_positions=0,
+        daily_realized_pnl=-settings.max_daily_loss_usd,
+        rejected_orders=0,
+    )
+    assert service.safety_stop_reason(account_state) == "daily_loss_limit"

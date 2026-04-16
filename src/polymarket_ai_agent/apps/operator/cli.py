@@ -196,15 +196,22 @@ def run_loop(
         service = _service()
         resolved_market_id = _resolve_market_id(service, market_id, active)
         cycles = []
+        stop_reason = service.safety_stop_reason()
         for idx in range(iterations):
+            if stop_reason:
+                break
             cycles.append(service.run_cycle(resolved_market_id))
+            stop_reason = service.safety_stop_reason()
             if idx < iterations - 1 and interval_seconds > 0:
                 time.sleep(interval_seconds)
         console.print_json(
             json.dumps(
                 {
                     "market_id": resolved_market_id,
-                    "iterations": iterations,
+                    "iterations_requested": iterations,
+                    "iterations_completed": len(cycles),
+                    "stopped_early": bool(stop_reason),
+                    "stop_reason": stop_reason,
                     "cycles": cycles,
                 }
             )

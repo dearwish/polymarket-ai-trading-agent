@@ -69,6 +69,9 @@ class StubService:
     def status(self):
         return {"trading_mode": "paper", "open_positions": 0}
 
+    def safety_stop_reason(self):
+        return None
+
     def generate_operator_report(self, session_id=None):
         class Report:
             session_id = session_id or "session-1"
@@ -165,7 +168,8 @@ def test_cli_run_loop(monkeypatch) -> None:
     monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
     result = runner.invoke(app, ["run-loop", "123", "--iterations", "2", "--interval-seconds", "0"])
     assert result.exit_code == 0
-    assert "\"iterations\": 2" in result.stdout
+    assert "\"iterations_requested\": 2" in result.stdout
+    assert "\"iterations_completed\": 2" in result.stdout
 
 
 def test_cli_paper_with_active_market(monkeypatch) -> None:
@@ -180,6 +184,26 @@ def test_cli_run_loop_with_active_market(monkeypatch) -> None:
     result = runner.invoke(app, ["run-loop", "--active", "--iterations", "1", "--interval-seconds", "0"])
     assert result.exit_code == 0
     assert "active-123" in result.stdout
+
+
+def test_cli_run_loop_stops_early_on_safety_stop(monkeypatch) -> None:
+    class SafetyStopService(StubService):
+        def __init__(self):
+            self.calls = 0
+
+        def run_cycle(self, market_id: str):
+            self.calls += 1
+            return super().run_cycle(market_id)
+
+        def safety_stop_reason(self):
+            return "daily_loss_limit" if self.calls >= 1 else None
+
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: SafetyStopService())
+    result = runner.invoke(app, ["run-loop", "123", "--iterations", "3", "--interval-seconds", "0"])
+    assert result.exit_code == 0
+    assert "\"stopped_early\": true" in result.stdout
+    assert "\"iterations_completed\": 1" in result.stdout
+    assert "\"stop_reason\": \"daily_loss_limit\"" in result.stdout
 
 
 def test_cli_paper_requires_market_or_active(monkeypatch) -> None:

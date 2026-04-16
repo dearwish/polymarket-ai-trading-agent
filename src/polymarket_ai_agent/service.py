@@ -198,6 +198,7 @@ class AgentService:
     def status(self) -> dict:
         auth_status = self.polymarket.get_auth_status()
         account_state = self.portfolio.get_account_state(ExecutionMode(self.settings.trading_mode))
+        safety_stop_reason = self.safety_stop_reason(account_state)
         return {
             "trading_mode": self.settings.trading_mode,
             "market_family": self.settings.market_family,
@@ -210,6 +211,7 @@ class AgentService:
             "daily_realized_pnl": account_state.daily_realized_pnl,
             "rejected_orders": account_state.rejected_orders,
             "daily_loss_limit_reached": account_state.daily_realized_pnl <= -self.settings.max_daily_loss_usd,
+            "safety_stop_reason": safety_stop_reason,
             "paper_position_ttl_seconds": self.settings.paper_position_ttl_seconds,
             "auth": {
                 "private_key_configured": auth_status.private_key_configured,
@@ -219,3 +221,11 @@ class AgentService:
                 "missing": auth_status.missing,
             },
         }
+
+    def safety_stop_reason(self, account_state: AccountState | None = None) -> str | None:
+        state = account_state or self.portfolio.get_account_state(ExecutionMode(self.settings.trading_mode))
+        if state.daily_realized_pnl <= -self.settings.max_daily_loss_usd:
+            return "daily_loss_limit"
+        if state.rejected_orders >= self.settings.max_rejected_orders:
+            return "rejected_order_limit"
+        return None
