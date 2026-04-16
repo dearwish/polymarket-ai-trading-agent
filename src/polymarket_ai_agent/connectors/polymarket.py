@@ -31,6 +31,12 @@ class PolymarketConnector:
 
     def discover_active_market(self, limit: int = 50) -> MarketCandidate | None:
         markets = self.discover_markets(limit=limit)
+        if self.settings.market_family == "btc_5m":
+            markets = [
+                market
+                for market in markets
+                if 0 < self.estimate_seconds_to_expiry(market.end_date_iso) <= 20 * 60
+            ]
         return markets[0] if markets else None
 
     def get_market(self, market_id: str) -> MarketCandidate:
@@ -78,6 +84,23 @@ class PolymarketConnector:
             missing=missing,
         )
 
+    def probe_live_readiness(self) -> AuthStatus:
+        status = self.get_auth_status()
+        if not status.live_client_constructible:
+            return status
+        status.probe_attempted = True
+        try:
+            client = self.build_live_client()
+            status.wallet_address = str(client.get_address() or "")
+            creds = client.create_or_derive_api_creds()
+            client.set_api_creds(creds)
+            status.api_credentials_derived = True
+            status.server_ok = bool(client.get_ok())
+            status.readonly_ready = status.api_credentials_derived and status.server_ok
+        except Exception as exc:
+            status.errors.append(str(exc))
+        return status
+
     def build_live_client(self) -> ClobClient:
         status = self.get_auth_status()
         if not status.live_client_constructible:
@@ -121,12 +144,16 @@ class PolymarketConnector:
             resolution_source=item.get("description") or "",
         )
 
-    @staticmethod
-    def _sort_market_candidates(markets: list[MarketCandidate]) -> list[MarketCandidate]:
+    def _sort_market_candidates(self, markets: list[MarketCandidate]) -> list[MarketCandidate]:
         def sort_key(candidate: MarketCandidate) -> tuple[int, float, float]:
             seconds_to_expiry = PolymarketConnector._seconds_to_expiry(candidate.end_date_iso)
             effective_expiry = seconds_to_expiry if seconds_to_expiry >= 0 else 10**9
-            return (effective_expiry, -candidate.volume_24h_usd, -candidate.liquidity_usd)
+            family_score = (
+                self._btc_5m_match_score(candidate.question, candidate.resolution_source, candidate.slug)
+                if self.settings.market_family == "btc_5m"
+                else 0
+            )
+            return (-family_score, effective_expiry, -candidate.volume_24h_usd, -candidate.liquidity_usd)
 
         return sorted(markets, key=sort_key)
 
@@ -138,18 +165,43 @@ class PolymarketConnector:
             return -1
         return int((expiry - datetime.now(timezone.utc)).total_seconds())
 
+    @classmethod
+    def _matches_btc_5m_market(cls, item: dict[str, Any]) -> bool:
+        return (
+            cls._btc_5m_match_score(
+                str(item.get("question") or ""),
+                str(item.get("description") or ""),
+                str(item.get("slug") or ""),
+            )
+            >= 3
+        )
+
     @staticmethod
-    def _matches_btc_5m_market(item: dict[str, Any]) -> bool:
-        haystacks = [
-            str(item.get("question") or ""),
-            str(item.get("description") or ""),
-            str(item.get("slug") or ""),
-        ]
-        joined = " ".join(haystacks).lower()
+    def _btc_5m_match_score(question: str, description: str, slug: str) -> int:
+        joined = " ".join([question, description, slug]).lower()
         has_btc = "bitcoin" in joined or "btc" in joined
-        has_short_window = "5 minutes" in joined or "five minutes" in joined or re.search(r"\b5m\b", joined) is not None
-        has_direction = "up or down" in joined or "above or below" in joined or "higher or lower" in joined
-        return has_btc and has_short_window and has_direction
+        has_5m_window = "5 minutes" in joined or "five minutes" in joined or re.search(r"\b5m\b", joined) is not None
+        has_direction = any(
+            phrase in joined
+            for phrase in (
+                "up or down",
+                "above or below",
+                "higher or lower",
+                "rise or fall",
+                "go up or down",
+            )
+        )
+        mentions_short_expiry = "minute" in joined or re.search(r"\b\d+m\b", joined) is not None
+        score = 0
+        if has_btc:
+            score += 1
+        if has_5m_window:
+            score += 2
+        elif mentions_short_expiry:
+            score += 1
+        if has_direction:
+            score += 2
+        return score
 
     @staticmethod
     def _parse_token_ids(raw_value: Any) -> list[str]:

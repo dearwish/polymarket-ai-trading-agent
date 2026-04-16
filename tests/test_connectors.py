@@ -97,6 +97,57 @@ def test_polymarket_connector_prefers_nearest_active_btc_5m_market(settings) -> 
     assert market.market_id == "nearer"
 
 
+def test_polymarket_connector_ignores_far_expiry_btc_5m_markets(settings) -> None:
+    payload = [
+        {
+            "id": "too-far",
+            "question": "Will Bitcoin be up or down in 5 minutes?",
+            "conditionId": "cond-too-far",
+            "slug": "btc-too-far",
+            "endDate": (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat(),
+            "clobTokenIds": '["yes-too-far","no-too-far"]',
+            "outcomePrices": "[0.51,0.49]",
+            "liquidityNum": 1000,
+            "volume24hr": 2000,
+            "description": "Resolution text",
+        }
+    ]
+    connector = PolymarketConnector(settings, client=DummyClient([payload]))
+    assert connector.discover_active_market() is None
+
+
+def test_polymarket_connector_prefers_exact_btc_5m_match_score(settings) -> None:
+    payload = [
+        {
+            "id": "vague",
+            "question": "Will BTC move in the next few minutes?",
+            "conditionId": "cond-vague",
+            "slug": "btc-next-minutes",
+            "endDate": (datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat(),
+            "clobTokenIds": '["yes-vague","no-vague"]',
+            "outcomePrices": "[0.51,0.49]",
+            "liquidityNum": 5000,
+            "volume24hr": 6000,
+            "description": "Short-term BTC direction market",
+        },
+        {
+            "id": "exact",
+            "question": "Will Bitcoin be up or down in 5 minutes?",
+            "conditionId": "cond-exact",
+            "slug": "btc-5m-exact",
+            "endDate": (datetime.now(timezone.utc) + timedelta(minutes=6)).isoformat(),
+            "clobTokenIds": '["yes-exact","no-exact"]',
+            "outcomePrices": "[0.52,0.48]",
+            "liquidityNum": 1000,
+            "volume24hr": 1500,
+            "description": "Resolution text",
+        },
+    ]
+    connector = PolymarketConnector(settings, client=DummyClient([payload]))
+    markets = connector.discover_markets()
+    assert markets[0].market_id == "exact"
+
+
 def test_polymarket_connector_builds_orderbook_snapshot(settings) -> None:
     client = DummyClient(
         [
@@ -142,3 +193,48 @@ def test_polymarket_connector_reports_constructible_live_auth(settings) -> None:
     assert auth.live_client_constructible
     client = connector.build_live_client()
     assert client is not None
+
+
+def test_polymarket_connector_probes_live_readiness(settings) -> None:
+    configured = settings.model_copy(
+        update={
+            "polymarket_private_key": "0x" + "1" * 64,
+        }
+    )
+    connector = PolymarketConnector(configured, client=DummyClient([]))
+
+    class StubLiveClient:
+        def get_address(self):
+            return "0xabc"
+
+        def create_or_derive_api_creds(self):
+            return {"key": "derived"}
+
+        def set_api_creds(self, creds):
+            self.creds = creds
+
+        def get_ok(self):
+            return True
+
+    connector.build_live_client = lambda: StubLiveClient()
+    auth = connector.probe_live_readiness()
+    assert auth.probe_attempted
+    assert auth.wallet_address == "0xabc"
+    assert auth.api_credentials_derived
+    assert auth.server_ok
+    assert auth.readonly_ready
+    assert auth.errors == []
+
+
+def test_polymarket_connector_captures_probe_errors(settings) -> None:
+    configured = settings.model_copy(
+        update={
+            "polymarket_private_key": "0x" + "1" * 64,
+        }
+    )
+    connector = PolymarketConnector(configured, client=DummyClient([]))
+    connector.build_live_client = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    auth = connector.probe_live_readiness()
+    assert auth.probe_attempted
+    assert not auth.readonly_ready
+    assert auth.errors == ["boom"]

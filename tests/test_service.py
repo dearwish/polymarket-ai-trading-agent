@@ -22,6 +22,8 @@ def test_agent_service_status(settings) -> None:
     assert "daily_loss_limit_reached" in status
     assert "safety_stop_reason" in status
     assert "auth" in status
+    assert "probe_attempted" in status["auth"]
+    assert "readonly_ready" in status["auth"]
 
 
 def test_agent_service_discover_markets_logs(settings, market_candidate) -> None:
@@ -184,3 +186,27 @@ def test_agent_service_safety_stop_reason(settings) -> None:
         rejected_orders=0,
     )
     assert service.safety_stop_reason(account_state) == "daily_loss_limit"
+
+
+def test_agent_service_status_reports_auth_probe(settings) -> None:
+    service = AgentService(settings)
+    service.polymarket.probe_live_readiness = lambda: type(
+        "Auth",
+        (),
+        {
+            "private_key_configured": True,
+            "funder_configured": False,
+            "signature_type": 0,
+            "live_client_constructible": True,
+            "missing": [],
+            "wallet_address": "0xabc",
+            "api_credentials_derived": True,
+            "server_ok": True,
+            "readonly_ready": True,
+            "probe_attempted": True,
+            "errors": [],
+        },
+    )()
+    status = service.status()
+    assert status["auth"]["wallet_address"] == "0xabc"
+    assert status["auth"]["readonly_ready"] is True

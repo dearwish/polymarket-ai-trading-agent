@@ -164,6 +164,12 @@ class AuthStatus:
     signature_type: int
     live_client_constructible: bool
     missing: list[str]
+    wallet_address: str = ""
+    api_credentials_derived: bool = False
+    server_ok: bool = False
+    readonly_ready: bool = False
+    probe_attempted: bool = False
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

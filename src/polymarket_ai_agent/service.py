@@ -196,7 +196,7 @@ class AgentService:
         return ",".join(sorted(payload.keys()))[:120]
 
     def status(self) -> dict:
-        auth_status = self.polymarket.get_auth_status()
+        auth_status = self.polymarket.probe_live_readiness()
         account_state = self.portfolio.get_account_state(ExecutionMode(self.settings.trading_mode))
         safety_stop_reason = self.safety_stop_reason(account_state)
         return {
@@ -219,6 +219,12 @@ class AgentService:
                 "signature_type": auth_status.signature_type,
                 "live_client_constructible": auth_status.live_client_constructible,
                 "missing": auth_status.missing,
+                "wallet_address": auth_status.wallet_address,
+                "api_credentials_derived": auth_status.api_credentials_derived,
+                "server_ok": auth_status.server_ok,
+                "readonly_ready": auth_status.readonly_ready,
+                "probe_attempted": auth_status.probe_attempted,
+                "errors": auth_status.errors,
             },
         }
 
