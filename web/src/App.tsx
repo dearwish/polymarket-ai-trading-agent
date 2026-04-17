@@ -83,6 +83,19 @@ type ClosedPositionsPayload = {
   positions: ClosedPosition[];
 };
 
+type EquityPoint = {
+  sequence: number;
+  market_id: string;
+  closed_at: string | null;
+  realized_pnl: number;
+  equity: number;
+};
+
+type EquityCurvePayload = {
+  count: number;
+  points: EquityPoint[];
+};
+
 type ReportPayload = {
   session_id: string;
   generated_at: string;
@@ -119,6 +132,9 @@ type LiveOrder = {
   status: string;
   price?: number;
   size?: number;
+  size_matched?: number;
+  created_at?: string;
+  asset_id?: string;
 };
 
 type LiveOrdersPayload = {
@@ -131,6 +147,9 @@ type LiveTrade = {
   order_id?: string;
   market_id?: string;
   status?: string;
+  side?: string;
+  amount?: number;
+  asset_id?: string;
   price?: number;
   size?: number;
   created_at?: string;
@@ -147,6 +166,7 @@ type DashboardState = {
   liveActivity: LiveActivityPayload | null;
   portfolioSummary: PortfolioSummaryPayload | null;
   closedPositions: ClosedPositionsPayload | null;
+  equityCurve: EquityCurvePayload | null;
   report: ReportPayload | null;
   recentEvents: RecentEvent[];
   recentDecisions: DecisionItem[];
@@ -197,32 +217,32 @@ function getInitialView(): ViewKey {
   return VIEWS.some((item) => item.key === hash) ? hash : "overview";
 }
 
-function PnlChart({ positions }: { positions: ClosedPosition[] }) {
-  const points = useMemo(() => {
-    if (!positions.length) return "";
-    const max = Math.max(...positions.map((item) => item.cumulative_pnl), 0.01);
-    const min = Math.min(...positions.map((item) => item.cumulative_pnl), 0);
+function PnlChart({ points }: { points: EquityPoint[] }) {
+  const polylinePoints = useMemo(() => {
+    if (!points.length) return "";
+    const max = Math.max(...points.map((item) => item.equity), 0.01);
+    const min = Math.min(...points.map((item) => item.equity), 0);
     const range = Math.max(max - min, 0.01);
-    return positions
+    return points
       .map((item, index) => {
-        const x = positions.length === 1 ? 0 : (index / (positions.length - 1)) * 100;
-        const y = 100 - ((item.cumulative_pnl - min) / range) * 100;
+        const x = points.length === 1 ? 0 : (index / (points.length - 1)) * 100;
+        const y = 100 - ((item.equity - min) / range) * 100;
         return `${x},${y}`;
       })
       .join(" ");
-  }, [positions]);
+  }, [points]);
 
-  if (!positions.length) return <div className="empty-state">No closed positions yet.</div>;
+  if (!points.length) return <div className="empty-state">No closed positions yet.</div>;
 
   return (
     <svg className="chart" viewBox="0 0 100 100" preserveAspectRatio="none">
-      <polyline fill="none" stroke="currentColor" strokeWidth="2" points={points} />
+      <polyline fill="none" stroke="currentColor" strokeWidth="2" points={polylinePoints} />
     </svg>
   );
 }
 
 function OverviewPage({ state }: { state: DashboardState }) {
-  const { auth, status, portfolioSummary, liveActivity, closedPositions } = state;
+  const { auth, status, portfolioSummary, liveActivity, equityCurve } = state;
   return (
     <>
       <section className="grid cards">
@@ -271,10 +291,10 @@ function OverviewPage({ state }: { state: DashboardState }) {
       <section className="grid detail-grid">
         <article className="panel">
           <div className="panel-header">
-            <h2>PnL Curve</h2>
-            <span>{closedPositions?.count ?? 0} realized trades</span>
+            <h2>Equity Curve</h2>
+            <span>{equityCurve?.count ?? 0} realized points</span>
           </div>
-          <PnlChart positions={closedPositions?.positions ?? []} />
+          <PnlChart points={equityCurve?.points ?? []} />
         </article>
 
         <article className="panel">
@@ -342,6 +362,10 @@ function DecisionsPage({ decisions }: { decisions: DecisionItem[] }) {
 }
 
 function OrdersPage({ liveOrders, liveTrades, liveActivity }: { liveOrders: LiveOrder[]; liveTrades: LiveTrade[]; liveActivity: LiveActivityPayload | null }) {
+  const [selectedOrderId, setSelectedOrderId] = useState<string>("");
+  const [selectedTradeId, setSelectedTradeId] = useState<string>("");
+  const selectedOrder = liveOrders.find((order) => order.order_id === selectedOrderId) ?? liveOrders[0];
+  const selectedTrade = liveTrades.find((trade) => trade.trade_id === selectedTradeId) ?? liveTrades[0];
   return (
     <section className="grid detail-grid">
       <article className="panel">
@@ -361,7 +385,7 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity }: { liveOrders: Live
             </thead>
             <tbody>
               {liveOrders.map((order) => (
-                <tr key={order.order_id}>
+                <tr key={order.order_id} className={selectedOrder?.order_id === order.order_id ? "selected-row" : ""} onClick={() => setSelectedOrderId(order.order_id)}>
                   <td>{order.order_id}</td>
                   <td>{order.market_id || "n/a"}</td>
                   <td>{order.side || "n/a"}</td>
@@ -391,7 +415,7 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity }: { liveOrders: Live
             </thead>
             <tbody>
               {liveTrades.map((trade) => (
-                <tr key={trade.trade_id}>
+                <tr key={trade.trade_id} className={selectedTrade?.trade_id === trade.trade_id ? "selected-row" : ""} onClick={() => setSelectedTradeId(trade.trade_id)}>
                   <td>{trade.trade_id}</td>
                   <td>{trade.order_id || "n/a"}</td>
                   <td>{trade.market_id || "n/a"}</td>
@@ -406,26 +430,42 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity }: { liveOrders: Live
 
       <article className="panel full-span">
         <div className="panel-header">
-          <h2>Live Preflight State</h2>
+          <h2>Detail Drawer</h2>
           <span>{liveActivity?.market_id || "n/a"}</span>
         </div>
-        <p className="subtitle">{liveActivity?.preflight.market.question || "n/a"}</p>
-        <div className="decision-grid">
+        <div className="detail-drawer-grid">
           <div>
-            <label>Blockers</label>
-            <strong>{liveActivity?.preflight.blockers.join(", ") || "none"}</strong>
+            <label>Selected Order</label>
+            <strong>{selectedOrder?.order_id || "n/a"}</strong>
+            <p className="detail-copy">
+              status={selectedOrder?.status || "n/a"} | side={selectedOrder?.side || "n/a"} | market={selectedOrder?.market_id || "n/a"}
+            </p>
+            <p className="detail-copy">
+              price={selectedOrder?.price ?? "n/a"} | size={selectedOrder?.size ?? "n/a"} | matched={selectedOrder?.size_matched ?? "n/a"}
+            </p>
+            <p className="detail-copy">created={selectedOrder?.created_at || "n/a"} | asset={selectedOrder?.asset_id || "n/a"}</p>
           </div>
           <div>
-            <label>Liquidity</label>
-            <strong>{formatMoney(liveActivity?.preflight.market.liquidity_usd)}</strong>
+            <label>Selected Trade</label>
+            <strong>{selectedTrade?.trade_id || "n/a"}</strong>
+            <p className="detail-copy">
+              status={selectedTrade?.status || "n/a"} | side={selectedTrade?.side || "n/a"} | market={selectedTrade?.market_id || "n/a"}
+            </p>
+            <p className="detail-copy">
+              price={selectedTrade?.price ?? "n/a"} | size={selectedTrade?.size ?? "n/a"} | amount={selectedTrade?.amount ?? "n/a"}
+            </p>
+            <p className="detail-copy">created={selectedTrade?.created_at || "n/a"} | asset={selectedTrade?.asset_id || "n/a"}</p>
           </div>
           <div>
-            <label>Implied Probability</label>
-            <strong>{formatPct(liveActivity?.preflight.market.implied_probability)}</strong>
-          </div>
-          <div>
-            <label>Fair Probability</label>
-            <strong>{formatPct(liveActivity?.preflight.assessment.fair_probability)}</strong>
+            <label>Live Preflight</label>
+            <strong>{liveActivity?.preflight.market.question || "n/a"}</strong>
+            <p className="detail-copy">blockers={liveActivity?.preflight.blockers.join(", ") || "none"}</p>
+            <p className="detail-copy">
+              implied={formatPct(liveActivity?.preflight.market.implied_probability)} | fair={formatPct(liveActivity?.preflight.assessment.fair_probability)}
+            </p>
+            <p className="detail-copy">
+              confidence={formatPct(liveActivity?.preflight.assessment.confidence)} | liquidity={formatMoney(liveActivity?.preflight.market.liquidity_usd)}
+            </p>
           </div>
         </div>
       </article>
@@ -433,15 +473,19 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity }: { liveOrders: Live
   );
 }
 
-function PortfolioPage({ summary, positions }: { summary: PortfolioSummaryPayload | null; positions: ClosedPosition[] }) {
+function PortfolioPage({ summary, positions, equityCurve }: { summary: PortfolioSummaryPayload | null; positions: ClosedPosition[]; equityCurve: EquityCurvePayload | null }) {
   return (
     <section className="grid detail-grid">
       <article className="panel">
         <div className="panel-header">
-          <h2>PnL Curve</h2>
-          <span>{positions.length} closed positions</span>
+          <h2>Equity Curve</h2>
+          <span>{equityCurve?.count ?? 0} closed points</span>
         </div>
-        <PnlChart positions={positions} />
+        <PnlChart points={equityCurve?.points ?? []} />
+        <div className="axis-labels">
+          <span>{equityCurve?.points[0]?.closed_at?.slice(0, 10) || "start"}</span>
+          <span>{equityCurve?.points[equityCurve.points.length - 1]?.closed_at?.slice(0, 10) || "latest"}</span>
+        </div>
       </article>
 
       <article className="panel">
@@ -537,6 +581,7 @@ export default function App() {
     liveActivity: null,
     portfolioSummary: null,
     closedPositions: null,
+    equityCurve: null,
     report: null,
     recentEvents: [],
     recentDecisions: [],
@@ -563,6 +608,7 @@ export default function App() {
           liveActivity,
           portfolioSummary,
           closedPositions,
+          equityCurve,
           report,
           recentEvents,
           recentDecisions,
@@ -574,6 +620,7 @@ export default function App() {
           fetchJson<LiveActivityPayload>("/api/live/activity"),
           fetchJson<PortfolioSummaryPayload>("/api/portfolio/summary"),
           fetchJson<ClosedPositionsPayload>("/api/portfolio/closed-positions"),
+          fetchJson<EquityCurvePayload>("/api/portfolio/equity-curve"),
           fetchJson<ReportPayload>("/api/report"),
           fetchJson<RecentEventsPayload>("/api/events/recent?limit=12"),
           fetchJson<DecisionsPayload>("/api/decisions/recent?limit=20"),
@@ -586,6 +633,7 @@ export default function App() {
           liveActivity,
           portfolioSummary,
           closedPositions,
+          equityCurve,
           report,
           recentEvents: recentEvents.events,
           recentDecisions: recentDecisions.decisions,
@@ -621,7 +669,7 @@ export default function App() {
       case "orders":
         return <OrdersPage liveOrders={state.liveOrders} liveTrades={state.liveTrades} liveActivity={state.liveActivity} />;
       case "portfolio":
-        return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} />;
+        return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} equityCurve={state.equityCurve} />;
       case "events":
         return <EventsPage events={state.recentEvents} report={state.report} />;
       case "overview":

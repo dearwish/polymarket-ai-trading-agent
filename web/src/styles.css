@@ -242,6 +242,14 @@ td {
   text-align: left;
 }
 
+tbody tr {
+  cursor: pointer;
+}
+
+tbody tr.selected-row {
+  background: rgba(77, 212, 172, 0.08);
+}
+
 th {
   color: var(--muted);
   font-weight: 500;
@@ -267,6 +275,33 @@ th {
   display: block;
   color: var(--text);
   margin-bottom: 6px;
+}
+
+.detail-drawer-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.detail-drawer-grid > div {
+  background: var(--panel-strong);
+  border-radius: 18px;
+  padding: 16px;
+}
+
+.detail-copy {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.axis-labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 10px;
 }
 
 .positive {
@@ -298,7 +333,8 @@ th {
   .hero,
   .cards,
   .detail-grid,
-  .decision-grid {
+  .decision-grid,
+  .detail-drawer-grid {
     grid-template-columns: 1fr;
     display: grid;
   }

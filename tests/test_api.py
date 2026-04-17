@@ -276,3 +276,12 @@ def test_api_closed_positions() -> None:
     payload = response.json()
     assert payload["count"] == 1
     assert payload["positions"][0]["cumulative_pnl"] == 3.75
+
+
+def test_api_equity_curve() -> None:
+    client = TestClient(create_app(lambda: StubService()))
+    response = client.get("/api/portfolio/equity-curve")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["points"][0]["equity"] == 3.75

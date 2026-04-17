@@ -193,6 +193,24 @@ def create_app(service_factory: Callable[[], AgentService] = get_service) -> Fas
             )
         return {"count": len(items), "positions": items}
 
+    @app.get("/api/portfolio/equity-curve")
+    def equity_curve(limit: int = Query(200, ge=1, le=1000), service: AgentService = Depends(service_factory)) -> dict:
+        positions = list(reversed(service.portfolio.list_closed_positions(limit=limit)))
+        points = []
+        cumulative = 0.0
+        for index, position in enumerate(positions, start=1):
+            cumulative += position.realized_pnl
+            points.append(
+                {
+                    "sequence": index,
+                    "market_id": position.market_id,
+                    "closed_at": position.closed_at.isoformat() if position.closed_at else None,
+                    "realized_pnl": position.realized_pnl,
+                    "equity": round(cumulative, 6),
+                }
+            )
+        return {"count": len(points), "points": points}
+
     @app.get("/api/simulate")
     def simulate(
         market_id: str | None = Query(default=None),
