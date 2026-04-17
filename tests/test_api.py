@@ -31,7 +31,33 @@ class StubService:
         return {"readonly": True, "market_id": market_id or "active-123"}
 
     def live_activity(self, market_id=None, trade_limit=20):
-        return {"readonly": True, "market_id": market_id or "active-123", "recent_trades": {"count": 0}}
+        return {
+            "readonly": True,
+            "market_id": market_id or "active-123",
+            "last_poll": {
+                "polled_at": "2026-04-17T00:00:00+00:00",
+                "time_remaining_seconds": 1800,
+                "time_remaining_minutes": 30.0,
+                "trade_counts": {"yes": 2, "no": 1, "other": 0, "total": 3},
+            },
+            "preflight": {
+                "blockers": [],
+                "market": {
+                    "question": "Will BTC be above 82k?",
+                    "implied_probability": 0.42,
+                    "liquidity_usd": 1000.0,
+                    "seconds_to_expiry": 1800,
+                },
+                "assessment": {
+                    "fair_probability": 0.55,
+                    "confidence": 0.8,
+                    "edge": 0.03,
+                    "suggested_side": "YES",
+                },
+            },
+            "recent_trades": {"count": 3},
+            "tracked_orders": {"count": 0, "active_count": 0, "terminal_count": 0},
+        }
 
     def live_reconcile(self, market_id=None, trade_limit=20, order_limit=50):
         return {
@@ -168,6 +194,7 @@ def test_api_live_activity_active() -> None:
     response = client.get("/api/live/activity")
     assert response.status_code == 200
     assert response.json()["market_id"] == "active-123"
+    assert response.json()["last_poll"]["trade_counts"]["yes"] == 2
 
 
 def test_api_live_reconcile_active() -> None:

@@ -22,6 +22,17 @@ type AuthPayload = {
 
 type LiveActivityPayload = {
   market_id: string;
+  last_poll: {
+    polled_at: string;
+    time_remaining_seconds: number;
+    time_remaining_minutes: number;
+    trade_counts: {
+      yes: number;
+      no: number;
+      other: number;
+      total: number;
+    };
+  };
   preflight: {
     blockers: string[];
     market: {
@@ -246,13 +257,13 @@ function OverviewPage({ state }: { state: DashboardState }) {
         </article>
 
         <article className="card">
-          <h2>Live Snapshot</h2>
+          <h2>Last Poll</h2>
           <p>{liveActivity?.preflight.market.question || "n/a"}</p>
           <dl>
-            <div><dt>Implied</dt><dd>{formatPct(liveActivity?.preflight.market.implied_probability)}</dd></div>
-            <div><dt>Fair</dt><dd>{formatPct(liveActivity?.preflight.assessment.fair_probability)}</dd></div>
-            <div><dt>Confidence</dt><dd>{formatPct(liveActivity?.preflight.assessment.confidence)}</dd></div>
-            <div><dt>Blockers</dt><dd>{liveActivity?.preflight.blockers.join(", ") || "none"}</dd></div>
+            <div><dt>Time Remaining</dt><dd>{liveActivity ? `${liveActivity.last_poll.time_remaining_minutes.toFixed(1)} min` : "n/a"}</dd></div>
+            <div><dt>Yes Trades</dt><dd>{liveActivity?.last_poll.trade_counts.yes ?? 0}</dd></div>
+            <div><dt>No Trades</dt><dd>{liveActivity?.last_poll.trade_counts.no ?? 0}</dd></div>
+            <div><dt>Total Trades</dt><dd>{liveActivity?.last_poll.trade_counts.total ?? 0}</dd></div>
           </dl>
         </article>
       </section>
@@ -279,6 +290,10 @@ function OverviewPage({ state }: { state: DashboardState }) {
             <div>
               <label>Edge</label>
               <strong>{formatPct(liveActivity?.preflight.assessment.edge)}</strong>
+            </div>
+            <div>
+              <label>Time Remaining</label>
+              <strong>{liveActivity ? `${Math.max(liveActivity.last_poll.time_remaining_seconds, 0)}s` : "n/a"}</strong>
             </div>
             <div>
               <label>Tracked Orders</label>

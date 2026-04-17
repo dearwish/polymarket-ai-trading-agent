@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterable
 
 from polymarket_ai_agent.config import Settings
 from polymarket_ai_agent.connectors.external_feeds import ExternalFeedConnector
@@ -134,6 +135,8 @@ class AgentService:
                 "liquidity_usd": snapshot.candidate.liquidity_usd,
                 "volume_24h_usd": snapshot.candidate.volume_24h_usd,
                 "seconds_to_expiry": snapshot.seconds_to_expiry,
+                "yes_token_id": snapshot.candidate.yes_token_id,
+                "no_token_id": snapshot.candidate.no_token_id,
             },
             "orderbook": {
                 "bid": snapshot.orderbook.bid,
@@ -511,11 +514,22 @@ class AgentService:
         orders = self.polymarket.list_live_orders()
         trades = self.polymarket.list_live_trades(market_id=preflight["market_id"], limit=trade_limit)
         tracked_orders = self.portfolio.list_live_orders(limit=50)
+        trade_counts = self._trade_side_counts(
+            trades,
+            yes_token_id=str(preflight["market"].get("yes_token_id") or ""),
+            no_token_id=str(preflight["market"].get("no_token_id") or ""),
+        )
         payload = {
             "readonly": True,
             "market_id": preflight["market_id"],
             "auth": auth,
             "preflight": preflight,
+            "last_poll": {
+                "polled_at": utc_now().isoformat(),
+                "time_remaining_seconds": preflight["market"]["seconds_to_expiry"],
+                "time_remaining_minutes": round(preflight["market"]["seconds_to_expiry"] / 60, 1),
+                "trade_counts": trade_counts,
+            },
             "open_orders": {
                 "count": len(orders),
                 "orders": orders,
@@ -533,6 +547,25 @@ class AgentService:
         }
         self.journal.log_event("live_activity", payload)
         return payload
+
+    @staticmethod
+    def _trade_side_counts(trades: Iterable[dict], yes_token_id: str = "", no_token_id: str = "") -> dict:
+        counts = {"yes": 0, "no": 0, "other": 0, "total": 0}
+        for trade in trades:
+            counts["total"] += 1
+            asset_id = str(trade.get("asset_id") or "")
+            side = str(trade.get("side") or "").strip().upper()
+            if yes_token_id and asset_id == yes_token_id:
+                counts["yes"] += 1
+            elif no_token_id and asset_id == no_token_id:
+                counts["no"] += 1
+            elif side == "YES":
+                counts["yes"] += 1
+            elif side == "NO":
+                counts["no"] += 1
+            else:
+                counts["other"] += 1
+        return counts
 
     def live_reconcile(self, market_id: str | None = None, trade_limit: int = 20, order_limit: int = 50) -> dict:
         auth = self._auth_status_dict(self.polymarket.probe_live_readiness())
