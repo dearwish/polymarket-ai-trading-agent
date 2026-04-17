@@ -309,6 +309,33 @@ def test_api_dashboard_snapshot() -> None:
     assert payload["recent_events"]["count"] == 2
 
 
+def test_api_dashboard_handles_missing_active_market() -> None:
+    class ServiceWithoutActiveMarket(StubService):
+        def get_active_market_id(self):
+            raise RuntimeError("No active market matched the configured market family.")
+
+        def live_activity(self, market_id=None, trade_limit=20):
+            raise RuntimeError("No active market matched the configured market family.")
+
+    client = TestClient(create_app(lambda: ServiceWithoutActiveMarket()))
+    response = client.get("/api/dashboard")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["live_activity"]["market_id"] == ""
+    assert payload["live_activity"]["preflight"]["blockers"] == ["no_active_market"]
+
+
+def test_api_live_activity_returns_404_when_active_market_missing() -> None:
+    class ServiceWithoutActiveMarket(StubService):
+        def get_active_market_id(self):
+            raise RuntimeError("No active market matched the configured market family.")
+
+    client = TestClient(create_app(lambda: ServiceWithoutActiveMarket()))
+    response = client.get("/api/live/activity")
+    assert response.status_code == 404
+    assert "No active market matched" in response.json()["detail"]
+
+
 def test_api_settings_round_trip(tmp_path: Path) -> None:
     base_settings = Settings(
         data_dir=tmp_path / "data",

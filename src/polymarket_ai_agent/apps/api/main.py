@@ -66,12 +66,58 @@ def create_app(
     def health() -> dict:
         return {"ok": True}
 
+    def resolve_active_market_id(service: AgentService, market_id: str | None, active: bool) -> str | None:
+        if market_id:
+            return market_id
+        if not active:
+            return None
+        try:
+            return service.get_active_market_id()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def safe_live_activity(service: AgentService) -> dict:
+        try:
+            return service.live_activity()
+        except Exception as exc:
+            return {
+                "readonly": True,
+                "market_id": "",
+                "auth": service.auth_status(),
+                "preflight": {
+                    "blockers": ["no_active_market"],
+                    "market": {
+                        "question": "No active market matched the configured market family.",
+                        "implied_probability": 0.0,
+                        "liquidity_usd": 0.0,
+                        "seconds_to_expiry": 0,
+                    },
+                    "assessment": {
+                        "fair_probability": 0.0,
+                        "confidence": 0.0,
+                        "edge": 0.0,
+                        "suggested_side": "ABSTAIN",
+                    },
+                },
+                "last_poll": {
+                    "polled_at": "",
+                    "time_remaining_seconds": 0,
+                    "time_remaining_minutes": 0.0,
+                    "market_trade_count": 0,
+                    "trade_counts": {"yes": 0, "no": 0, "other": 0, "total": 0},
+                },
+                "open_orders": {"count": 0, "orders": []},
+                "tracked_orders": {"count": 0, "active_count": 0, "terminal_count": 0, "orders": []},
+                "recent_trades": {"count": 0, "trades": []},
+                "error": str(exc),
+            }
+
     def build_dashboard_snapshot(service: AgentService) -> dict:
         return {
             "status": service.status(),
             "auth": service.auth_status(),
             "settings": runtime_settings_payload(service.settings),
-            "live_activity": service.live_activity(),
+            "live_activity": safe_live_activity(service),
             "portfolio_summary": portfolio_summary(service=service),
             "closed_positions": closed_positions(limit=100, service=service),
             "equity_curve": equity_curve(limit=200, service=service),
@@ -142,9 +188,7 @@ def create_app(
         active: bool = Query(default=True),
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = market_id
-        if not resolved_market_id and active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, market_id, active)
         return service.doctor(resolved_market_id or None)
 
     @app.get("/api/live/activity")
@@ -154,9 +198,7 @@ def create_app(
         trade_limit: int = Query(20, ge=1, le=200),
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = market_id
-        if not resolved_market_id and active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, market_id, active)
         return service.live_activity(resolved_market_id or None, trade_limit=trade_limit)
 
     @app.get("/api/live/reconcile")
@@ -167,9 +209,7 @@ def create_app(
         order_limit: int = Query(50, ge=1, le=500),
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = market_id
-        if not resolved_market_id and active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, market_id, active)
         return service.live_reconcile(resolved_market_id or None, trade_limit=trade_limit, order_limit=order_limit)
 
     @app.get("/api/report")
@@ -309,9 +349,7 @@ def create_app(
         active: bool = Query(default=True),
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = market_id
-        if not resolved_market_id and active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, market_id, active)
         if not resolved_market_id:
             raise HTTPException(status_code=400, detail="Provide market_id or set active=true.")
         snapshot, assessment, decision = service.simulate_market(resolved_market_id)
@@ -339,9 +377,7 @@ def create_app(
         body: MarketActionRequest,
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = body.market_id
-        if not resolved_market_id and body.active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, body.market_id, body.active)
         if not resolved_market_id:
             raise HTTPException(status_code=400, detail="Provide market_id or set active=true.")
         snapshot, assessment, decision = service.simulate_market(resolved_market_id)
@@ -370,9 +406,7 @@ def create_app(
         body: MarketActionRequest,
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = body.market_id
-        if not resolved_market_id and body.active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, body.market_id, body.active)
         return service.live_preflight(resolved_market_id or None)
 
     @app.post("/api/actions/live-reconcile")
@@ -380,9 +414,7 @@ def create_app(
         body: MarketActionRequest,
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = body.market_id
-        if not resolved_market_id and body.active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, body.market_id, body.active)
         return service.live_reconcile(resolved_market_id or None)
 
     @app.post("/api/actions/live-watch")
@@ -390,9 +422,7 @@ def create_app(
         body: LiveWatchActionRequest,
         service: AgentService = Depends(service_factory),
     ) -> dict:
-        resolved_market_id = body.market_id
-        if not resolved_market_id and body.active:
-            resolved_market_id = service.get_active_market_id()
+        resolved_market_id = resolve_active_market_id(service, body.market_id, body.active)
         cycles: list[dict] = []
         previous = None
         for idx in range(body.iterations):
