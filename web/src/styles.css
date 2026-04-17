@@ -277,6 +277,42 @@ th {
   margin-bottom: 6px;
 }
 
+.event-entry {
+  overflow: hidden;
+}
+
+.event-entry-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.event-time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.toggle-button {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.event-preview {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .detail-drawer-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

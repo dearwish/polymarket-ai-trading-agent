@@ -361,6 +361,35 @@ function DecisionsPage({ decisions }: { decisions: DecisionItem[] }) {
   );
 }
 
+function EventEntry({
+  title,
+  timestamp,
+  content,
+  defaultExpanded = false,
+}: {
+  title: string;
+  timestamp: string;
+  content: string;
+  defaultExpanded?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const preview = content.length > 180 ? `${content.slice(0, 180)}...` : content;
+  return (
+    <li className="event-entry">
+      <div className="event-entry-header">
+        <div>
+          <strong>{title}</strong>
+          <div className="event-time">{timestamp}</div>
+        </div>
+        <button type="button" className="toggle-button" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "Collapse" : "Expand"}
+        </button>
+      </div>
+      <pre className="event-preview">{expanded ? content : preview}</pre>
+    </li>
+  );
+}
+
 function OrdersPage({ liveOrders, liveTrades, liveActivity }: { liveOrders: LiveOrder[]; liveTrades: LiveTrade[]; liveActivity: LiveActivityPayload | null }) {
   const [selectedOrderId, setSelectedOrderId] = useState<string>("");
   const [selectedTradeId, setSelectedTradeId] = useState<string>("");
@@ -549,11 +578,12 @@ function EventsPage({ events, report }: { events: RecentEvent[]; report: ReportP
         </div>
         <ul className="event-list">
           {visibleEvents.map((item, index) => (
-            <li key={`${item.logged_at}-${index}`}>
-              <strong>{item.event_type}</strong>
-              <div>{item.logged_at}</div>
-              <div>{shortText(eventPayloadSummary(item.payload), 140)}</div>
-            </li>
+            <EventEntry
+              key={`${item.logged_at}-${index}`}
+              title={item.event_type}
+              timestamp={item.logged_at}
+              content={JSON.stringify(item.payload, null, 2)}
+            />
           ))}
         </ul>
       </article>
@@ -565,7 +595,12 @@ function EventsPage({ events, report }: { events: RecentEvent[]; report: ReportP
         </div>
         <ul className="event-list">
           {(report?.items ?? []).slice(0, 12).map((item, index) => (
-            <li key={`${report?.session_id ?? "report"}-${index}`}>{item}</li>
+            <EventEntry
+              key={`${report?.session_id ?? "report"}-${index}`}
+              title="report_item"
+              timestamp={report?.generated_at || "n/a"}
+              content={item}
+            />
           ))}
         </ul>
       </article>
