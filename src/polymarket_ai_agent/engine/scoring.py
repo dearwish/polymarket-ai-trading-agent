@@ -65,11 +65,12 @@ class ScoringEngine:
             return self._score_as_invalid_model_response(packet, raw, str(exc))
         fair = float(parsed.fair_probability)
         edge = fair - packet.market_probability
+        suggested_side = self._align_suggested_side(parsed.suggested_side, edge)
         return MarketAssessment(
             market_id=packet.market_id,
             fair_probability=fair,
             confidence=float(parsed.confidence),
-            suggested_side=parsed.suggested_side,
+            suggested_side=suggested_side,
             expiry_risk=str(parsed.expiry_risk),
             reasons_for_trade=list(parsed.reasons_for_trade),
             reasons_to_abstain=list(parsed.reasons_to_abstain),
@@ -173,6 +174,17 @@ class ScoringEngine:
         if text.startswith("abstain") or text.startswith("avoid") or text.startswith("hold") or text.startswith("skip"):
             return SuggestedSide.ABSTAIN
         raise ValueError(f"Unrecognized suggested_side value: {value}")
+
+    @staticmethod
+    def _align_suggested_side(suggested_side: SuggestedSide, edge: float) -> SuggestedSide:
+        if abs(edge) < 1e-9:
+            return SuggestedSide.ABSTAIN
+        edge_side = SuggestedSide.YES if edge > 0 else SuggestedSide.NO
+        if suggested_side == SuggestedSide.ABSTAIN:
+            return edge_side
+        if suggested_side != edge_side:
+            return edge_side
+        return suggested_side
 
     def _score_as_invalid_model_response(
         self,

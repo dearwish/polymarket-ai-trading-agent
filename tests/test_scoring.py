@@ -133,6 +133,29 @@ def test_scoring_engine_normalizes_string_confidence_and_side(settings, market_s
     assert assessment.fair_probability == 0.49
 
 
+def test_scoring_engine_aligns_side_with_negative_edge(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(
+        configured,
+        client=DummyClient(
+            content=json.dumps(
+                {
+                    "fair_probability": 0.40,
+                    "confidence": "medium",
+                    "reasons_for_trade": ["Some downside edge."],
+                    "reasons_to_abstain": [],
+                    "expiry_risk": "LOW",
+                    "suggested_side": "yes",
+                }
+            )
+        ),
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.edge < 0
+    assert assessment.suggested_side == SuggestedSide.NO
+
+
 def test_scoring_engine_out_of_range_probability_abstains(settings, market_snapshot) -> None:
     packet = ResearchEngine().build_evidence_packet(market_snapshot)
     configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
