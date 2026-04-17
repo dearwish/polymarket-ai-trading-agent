@@ -114,6 +114,7 @@ class TradeDecision:
     limit_price: float
     rationale: list[str]
     rejected_by: list[str]
+    asset_id: str = ""
     decided_at: datetime = field(default_factory=utc_now)
 
 

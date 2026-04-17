@@ -34,6 +34,8 @@ class AgentService:
         self.execution = ExecutionEngine(
             ExecutionMode(settings.trading_mode),
             paper_entry_slippage_bps=settings.paper_entry_slippage_bps,
+            live_trading_enabled=settings.live_trading_enabled,
+            live_executor=self.polymarket.execute_live_trade,
         )
         self.journal = Journal(settings.db_path, settings.events_path)
         self.portfolio = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
@@ -271,6 +273,7 @@ class AgentService:
         return {
             "trading_mode": self.settings.trading_mode,
             "market_family": self.settings.market_family,
+            "live_trading_enabled": self.settings.live_trading_enabled,
             "loop_seconds": self.settings.loop_seconds,
             "openrouter_configured": bool(self.settings.openrouter_api_key),
             "db_path": str(self.settings.db_path),

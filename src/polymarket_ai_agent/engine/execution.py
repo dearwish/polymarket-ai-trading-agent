@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from polymarket_ai_agent.types import DecisionStatus, ExecutionMode, ExecutionResult, OrderBookSnapshot, TradeDecision
 
 
 class ExecutionEngine:
-    def __init__(self, mode: ExecutionMode, paper_entry_slippage_bps: float = 10.0):
+    def __init__(
+        self,
+        mode: ExecutionMode,
+        paper_entry_slippage_bps: float = 10.0,
+        live_trading_enabled: bool = False,
+        live_executor: Callable[[TradeDecision, OrderBookSnapshot | None], ExecutionResult] | None = None,
+    ):
         self.mode = mode
         self._counter = 0
         self.paper_entry_slippage_bps = paper_entry_slippage_bps
+        self.live_trading_enabled = live_trading_enabled
+        self.live_executor = live_executor
 
     def execute_trade(self, decision: TradeDecision, orderbook: OrderBookSnapshot | None = None) -> ExecutionResult:
         self._counter += 1
@@ -33,15 +43,37 @@ class ExecutionEngine:
                 detail=f"Paper trade executed for {decision.side.value} at {fill_price:.4f}",
                 fill_price=fill_price,
             )
-        return ExecutionResult(
-            market_id=decision.market_id,
-            success=False,
-            mode=self.mode,
-            order_id=order_id,
-            status="NOT_IMPLEMENTED",
-            detail="Live execution path is intentionally disabled in this scaffold.",
-            fill_price=0.0,
-        )
+        if not self.live_trading_enabled:
+            return ExecutionResult(
+                market_id=decision.market_id,
+                success=False,
+                mode=self.mode,
+                order_id=order_id,
+                status="LIVE_DISABLED",
+                detail="Live execution is disabled. Set LIVE_TRADING_ENABLED=true to allow real order posting.",
+                fill_price=0.0,
+            )
+        if not decision.asset_id:
+            return ExecutionResult(
+                market_id=decision.market_id,
+                success=False,
+                mode=self.mode,
+                order_id=order_id,
+                status="LIVE_INVALID",
+                detail="Approved live decision is missing the Polymarket asset_id/token_id.",
+                fill_price=0.0,
+            )
+        if not self.live_executor:
+            return ExecutionResult(
+                market_id=decision.market_id,
+                success=False,
+                mode=self.mode,
+                order_id=order_id,
+                status="LIVE_NOT_CONFIGURED",
+                detail="Live execution is enabled but no live executor has been configured.",
+                fill_price=0.0,
+            )
+        return self.live_executor(decision, orderbook)
 
     def manage_open_positions(self) -> list:
         return []

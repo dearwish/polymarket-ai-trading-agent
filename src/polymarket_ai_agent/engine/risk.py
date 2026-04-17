@@ -54,6 +54,7 @@ class RiskEngine:
             limit_price=limit_price,
             rationale=assessment.reasons_for_trade,
             rejected_by=[],
+            asset_id=snapshot.candidate.yes_token_id if side == SuggestedSide.YES else snapshot.candidate.no_token_id,
         )
 
     def evaluate(

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from polymarket_ai_agent.connectors.external_feeds import ExternalFeedConnector
 from polymarket_ai_agent.connectors.polymarket import PolymarketConnector
+from polymarket_ai_agent.types import DecisionStatus, SuggestedSide, TradeDecision
 
 
 class DummyResponse:
@@ -320,6 +321,71 @@ def test_polymarket_connector_collects_partial_diagnostics_with_errors(settings)
     assert auth.diagnostics_collected
     assert "collateral_address: no collateral" in auth.errors
     assert "open_orders: orders unavailable" in auth.errors
+
+
+def test_polymarket_connector_executes_live_trade_when_enabled(settings) -> None:
+    configured = settings.model_copy(
+        update={
+            "live_trading_enabled": True,
+            "live_order_type": "FOK",
+            "polymarket_private_key": "0x" + "1" * 64,
+        }
+    )
+    connector = PolymarketConnector(configured, client=DummyClient([]))
+
+    class StubLiveClient:
+        def create_or_derive_api_creds(self):
+            return {"key": "derived"}
+
+        def set_api_creds(self, creds):
+            self.creds = creds
+
+        def create_order(self, order_args):
+            self.order_args = order_args
+            return {"signed": True}
+
+        def post_order(self, order, orderType, post_only):
+            assert order == {"signed": True}
+            assert orderType == "FOK"
+            assert post_only is False
+            return {"orderID": "live-123", "status": "LIVE_SUBMITTED"}
+
+    stub = StubLiveClient()
+    connector.build_live_client = lambda: stub
+    decision = TradeDecision(
+        market_id="market-1",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.5,
+        rationale=["trade"],
+        rejected_by=[],
+        asset_id="token-yes",
+    )
+    result = connector.execute_live_trade(decision)
+    assert result.success
+    assert result.order_id == "live-123"
+    assert stub.order_args.token_id == "token-yes"
+    assert stub.order_args.price == 0.5
+    assert stub.order_args.size == 20.0
+    assert stub.order_args.side == "BUY"
+
+
+def test_polymarket_connector_blocks_live_trade_when_flag_disabled(settings) -> None:
+    connector = PolymarketConnector(settings, client=DummyClient([]))
+    decision = TradeDecision(
+        market_id="market-1",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.5,
+        rationale=["trade"],
+        rejected_by=[],
+        asset_id="token-yes",
+    )
+    result = connector.execute_live_trade(decision)
+    assert not result.success
+    assert result.status == "LIVE_DISABLED"
 
 
 def test_polymarket_connector_discovers_btc_daily_threshold_markets(settings) -> None:

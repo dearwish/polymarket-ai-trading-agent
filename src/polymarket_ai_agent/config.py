@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     polymarket_private_key: str = ""
     polymarket_funder: str = ""
     polymarket_signature_type: int = 0
+    live_trading_enabled: bool = False
+    live_order_type: str = "FOK"
+    live_post_only: bool = False
 
     max_position_usd: float = 10.0
     min_confidence: float = 0.75

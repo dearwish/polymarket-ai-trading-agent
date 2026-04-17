@@ -6,10 +6,11 @@ from typing import Any
 
 import httpx
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import AssetType, BalanceAllowanceParams, OpenOrderParams
+from py_clob_client.clob_types import AssetType, BalanceAllowanceParams, OpenOrderParams, OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY
 
 from polymarket_ai_agent.config import Settings
-from polymarket_ai_agent.types import AuthStatus, MarketCandidate, OrderBookSnapshot
+from polymarket_ai_agent.types import AuthStatus, ExecutionMode, ExecutionResult, MarketCandidate, OrderBookSnapshot, TradeDecision
 
 
 class PolymarketConnector:
@@ -121,6 +122,65 @@ class PolymarketConnector:
             funder=funder,
         )
 
+    def execute_live_trade(
+        self,
+        decision: TradeDecision,
+        orderbook: OrderBookSnapshot | None = None,
+    ) -> ExecutionResult:
+        if not self.settings.live_trading_enabled:
+            return ExecutionResult(
+                market_id=decision.market_id,
+                success=False,
+                mode=ExecutionMode.LIVE,
+                order_id="live-disabled",
+                status="LIVE_DISABLED",
+                detail="Live trading flag is disabled.",
+                fill_price=0.0,
+            )
+        if not decision.asset_id:
+            return ExecutionResult(
+                market_id=decision.market_id,
+                success=False,
+                mode=ExecutionMode.LIVE,
+                order_id="live-missing-asset",
+                status="LIVE_INVALID",
+                detail="Live trade decision is missing the Polymarket asset_id/token_id.",
+                fill_price=0.0,
+            )
+        client = self.build_live_client()
+        creds = client.create_or_derive_api_creds()
+        client.set_api_creds(creds)
+        share_size = round(decision.size_usd / decision.limit_price, 6)
+        order = client.create_order(
+            OrderArgs(
+                token_id=decision.asset_id,
+                price=decision.limit_price,
+                size=share_size,
+                side=BUY,
+            )
+        )
+        order_response = client.post_order(
+            order,
+            orderType=self._live_order_type(),
+            post_only=self.settings.live_post_only,
+        )
+        order_id = str(
+            order_response.get("orderID")
+            or order_response.get("orderId")
+            or order_response.get("id")
+            or ""
+        )
+        status = str(order_response.get("status") or "LIVE_SUBMITTED")
+        return ExecutionResult(
+            market_id=decision.market_id,
+            success=True,
+            mode=ExecutionMode.LIVE,
+            order_id=order_id,
+            status=status,
+            detail=f"Live order submitted for {share_size:.6f} shares at {decision.limit_price:.4f}",
+            fill_price=0.0,
+        )
+
     def _collect_account_diagnostics(self, client: ClobClient, status: AuthStatus) -> None:
         try:
             status.collateral_address = str(client.get_collateral_address() or "")
@@ -230,6 +290,13 @@ class PolymarketConnector:
         if self.settings.market_family in {"btc_5m", "btc_daily_threshold"}:
             return max(requested_limit, 200)
         return requested_limit
+
+    def _live_order_type(self) -> OrderType:
+        value = self.settings.live_order_type.strip().upper()
+        try:
+            return getattr(OrderType, value)
+        except AttributeError as exc:
+            raise ValueError(f"Unsupported live_order_type: {self.settings.live_order_type}") from exc
 
     @staticmethod
     def _extract_balance_allowance(payload: Any) -> tuple[float | None, float | None]:

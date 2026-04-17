@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from polymarket_ai_agent.engine.execution import ExecutionEngine
-from polymarket_ai_agent.types import DecisionStatus, ExecutionMode, SuggestedSide, TradeDecision
+from polymarket_ai_agent.types import DecisionStatus, ExecutionMode, ExecutionResult, SuggestedSide, TradeDecision
 
 
 def test_execution_engine_skips_non_approved_trade() -> None:
@@ -60,4 +60,47 @@ def test_execution_engine_blocks_live_trade_in_scaffold() -> None:
     )
     result = engine.execute_trade(decision)
     assert not result.success
-    assert result.status == "NOT_IMPLEMENTED"
+    assert result.status == "LIVE_DISABLED"
+
+
+def test_execution_engine_requires_asset_id_for_live_trade() -> None:
+    engine = ExecutionEngine(ExecutionMode.LIVE, live_trading_enabled=True)
+    decision = TradeDecision(
+        market_id="123",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.52,
+        rationale=["trade"],
+        rejected_by=[],
+    )
+    result = engine.execute_trade(decision)
+    assert not result.success
+    assert result.status == "LIVE_INVALID"
+
+
+def test_execution_engine_uses_live_executor_when_enabled() -> None:
+    def live_executor(decision, orderbook):
+        return ExecutionResult(
+            market_id=decision.market_id,
+            success=True,
+            mode=ExecutionMode.LIVE,
+            order_id="live-1",
+            status="LIVE_SUBMITTED",
+            detail="submitted",
+        )
+
+    engine = ExecutionEngine(ExecutionMode.LIVE, live_trading_enabled=True, live_executor=live_executor)
+    decision = TradeDecision(
+        market_id="123",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.52,
+        rationale=["trade"],
+        rejected_by=[],
+        asset_id="token-yes",
+    )
+    result = engine.execute_trade(decision)
+    assert result.success
+    assert result.status == "LIVE_SUBMITTED"
