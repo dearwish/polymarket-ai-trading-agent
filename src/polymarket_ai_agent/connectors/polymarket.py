@@ -53,21 +53,23 @@ class PolymarketConnector:
         response = self.client.get(f"{self.settings.polymarket_host}/book", params={"token_id": token_id})
         response.raise_for_status()
         data = response.json()
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
+        bids = sorted(data.get("bids", []), key=lambda level: float(level["price"]), reverse=True)
+        asks = sorted(data.get("asks", []), key=lambda level: float(level["price"]))
         best_bid = float(bids[0]["price"]) if bids else 0.0
         best_ask = float(asks[0]["price"]) if asks else 0.0
         midpoint = round((best_bid + best_ask) / 2, 6) if best_bid and best_ask else best_bid or best_ask
-        spread = round(max(best_ask - best_bid, 0.0), 6) if best_bid and best_ask else 1.0
+        spread = round(max(best_ask - best_bid, 0.0), 6) if best_bid and best_ask else 0.0
         bid_depth = sum(float(level["price"]) * float(level["size"]) for level in bids[:5])
         ask_depth = sum(float(level["price"]) * float(level["size"]) for level in asks[:5])
+        last_trade_price = float(data.get("last_trade_price") or data.get("lastTradePrice") or midpoint or 0.0)
         return OrderBookSnapshot(
             bid=best_bid,
             ask=best_ask,
             midpoint=midpoint,
             spread=spread,
             depth_usd=bid_depth + ask_depth,
-            last_trade_price=midpoint,
+            last_trade_price=last_trade_price,
+            two_sided=bool(best_bid and best_ask),
         )
 
     def get_auth_status(self) -> AuthStatus:

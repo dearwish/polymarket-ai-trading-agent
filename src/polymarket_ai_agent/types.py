@@ -49,6 +49,7 @@ class OrderBookSnapshot:
     spread: float
     depth_usd: float
     last_trade_price: float
+    two_sided: bool = True
     observed_at: datetime = field(default_factory=utc_now)
 
 

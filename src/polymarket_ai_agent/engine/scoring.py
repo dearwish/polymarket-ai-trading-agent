@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from textwrap import dedent
 
@@ -57,7 +58,9 @@ class ScoringEngine:
         body = response.json()
         raw = body["choices"][0]["message"]["content"]
         try:
-            parsed = OpenRouterAssessment.model_validate(json.loads(raw))
+            parsed = OpenRouterAssessment.model_validate(
+                self._normalize_openrouter_payload(json.loads(raw), packet)
+            )
         except (json.JSONDecodeError, ValidationError, KeyError, TypeError, ValueError) as exc:
             return self._score_as_invalid_model_response(packet, raw, str(exc))
         fair = float(parsed.fair_probability)
@@ -106,6 +109,70 @@ class ScoringEngine:
             edge=edge,
             raw_model_output="heuristic-fallback",
         )
+
+    def _normalize_openrouter_payload(self, payload: dict, packet: EvidencePacket) -> dict:
+        if not isinstance(payload, dict):
+            raise TypeError("Model payload must be a JSON object.")
+        normalized = dict(payload)
+        normalized["fair_probability"] = float(payload["fair_probability"])
+        normalized["confidence"] = self._normalize_confidence(payload["confidence"])
+        normalized["reasons_for_trade"] = self._normalize_reason_list(payload.get("reasons_for_trade", []))
+        normalized["reasons_to_abstain"] = self._normalize_reason_list(payload.get("reasons_to_abstain", []))
+        normalized["expiry_risk"] = str(payload.get("expiry_risk", "UNKNOWN"))
+        normalized["suggested_side"] = self._normalize_suggested_side(
+            payload["suggested_side"],
+            fair_probability=normalized["fair_probability"],
+            market_probability=packet.market_probability,
+        )
+        return normalized
+
+    @staticmethod
+    def _normalize_reason_list(value: object) -> list[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if value in (None, ""):
+            return []
+        return [str(value)]
+
+    @staticmethod
+    def _normalize_confidence(value: object) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip().lower()
+        if not text:
+            raise ValueError("confidence is empty")
+        percent_match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+        if percent_match:
+            return float(percent_match.group(1)) / 100.0
+        number_match = re.search(r"\b(0(?:\.\d+)?|1(?:\.0+)?)\b", text)
+        if number_match:
+            return float(number_match.group(1))
+        if "low to moderate" in text:
+            return 0.45
+        if "moderate to high" in text:
+            return 0.7
+        if "high" in text:
+            return 0.85
+        if "moderate" in text or "medium" in text:
+            return 0.6
+        if "low" in text:
+            return 0.3
+        raise ValueError(f"Unrecognized confidence value: {value}")
+
+    @staticmethod
+    def _normalize_suggested_side(value: object, fair_probability: float, market_probability: float) -> SuggestedSide:
+        if isinstance(value, SuggestedSide):
+            return value
+        text = str(value).strip().lower()
+        if not text:
+            raise ValueError("suggested_side is empty")
+        if text.startswith("yes"):
+            return SuggestedSide.YES
+        if text.startswith("no"):
+            return SuggestedSide.NO
+        if text.startswith("abstain") or text.startswith("avoid") or text.startswith("hold") or text.startswith("skip"):
+            return SuggestedSide.ABSTAIN
+        raise ValueError(f"Unrecognized suggested_side value: {value}")
 
     def _score_as_invalid_model_response(
         self,

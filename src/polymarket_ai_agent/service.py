@@ -64,6 +64,7 @@ class AgentService:
                 spread=orderbook.spread,
                 depth_usd=orderbook.depth_usd,
                 last_trade_price=orderbook.last_trade_price,
+                two_sided=orderbook.two_sided,
             ),
             seconds_to_expiry=seconds_to_expiry,
             recent_price_change_bps=(orderbook.midpoint - candidate.implied_probability) * 10_000,
@@ -252,6 +253,7 @@ class AgentService:
                 f"| midpoint={orderbook.get('midpoint', 0.0):.4f} "
                 f"| spread={orderbook.get('spread', 0.0):.4f} "
                 f"| depth={orderbook.get('depth_usd', 0.0):.2f} "
+                f"| two_sided={orderbook.get('two_sided', True)} "
                 f"| ttl={payload.get('seconds_to_expiry', -1)}s"
             )
         if "market_id" in payload:

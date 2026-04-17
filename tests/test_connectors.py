@@ -166,6 +166,26 @@ def test_polymarket_connector_builds_orderbook_snapshot(settings) -> None:
     assert snapshot.depth_usd > 0
 
 
+def test_polymarket_connector_uses_best_bid_from_unsorted_book(settings) -> None:
+    client = DummyClient(
+        [
+            {
+                "bids": [{"price": "0.001", "size": "100"}, {"price": "0.999", "size": "50"}],
+                "asks": [],
+                "last_trade_price": "0.999",
+            }
+        ]
+    )
+    connector = PolymarketConnector(settings, client=client)
+    snapshot = connector.get_orderbook_snapshot("yes-token")
+    assert snapshot.bid == 0.999
+    assert snapshot.ask == 0.0
+    assert snapshot.midpoint == 0.999
+    assert snapshot.spread == 0.0
+    assert snapshot.two_sided is False
+    assert snapshot.last_trade_price == 0.999
+
+
 def test_polymarket_connector_estimates_seconds_to_expiry(settings) -> None:
     connector = PolymarketConnector(settings, client=DummyClient([]))
     end_date = (datetime.now(timezone.utc) + timedelta(seconds=90)).isoformat()
