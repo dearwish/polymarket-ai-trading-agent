@@ -77,6 +77,17 @@ type ReportPayload = {
   items: string[];
 };
 
+type RecentEvent = {
+  event_type: string;
+  logged_at: string;
+  payload: Record<string, unknown>;
+};
+
+type RecentEventsPayload = {
+  count: number;
+  events: RecentEvent[];
+};
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(path);
   if (!response.ok) {
@@ -128,6 +139,7 @@ export default function App() {
   const [portfolioSummary, setPortfolioSummary] = useState<PortfolioSummaryPayload | null>(null);
   const [closedPositions, setClosedPositions] = useState<ClosedPositionsPayload | null>(null);
   const [report, setReport] = useState<ReportPayload | null>(null);
+  const [recentEvents, setRecentEvents] = useState<RecentEvent[]>([]);
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState(true);
 
@@ -136,13 +148,14 @@ export default function App() {
       setLoading(true);
       setError("");
       try {
-        const [statusData, authData, liveData, portfolioData, positionsData, reportData] = await Promise.all([
+        const [statusData, authData, liveData, portfolioData, positionsData, reportData, eventsData] = await Promise.all([
           fetchJson<StatusPayload>("/api/status"),
           fetchJson<AuthPayload>("/api/auth"),
           fetchJson<LiveActivityPayload>("/api/live/activity"),
           fetchJson<PortfolioSummaryPayload>("/api/portfolio/summary"),
           fetchJson<ClosedPositionsPayload>("/api/portfolio/closed-positions"),
           fetchJson<ReportPayload>("/api/report"),
+          fetchJson<RecentEventsPayload>("/api/events/recent?limit=8"),
         ]);
         setStatus(statusData);
         setAuth(authData);
@@ -150,6 +163,7 @@ export default function App() {
         setPortfolioSummary(portfolioData);
         setClosedPositions(positionsData);
         setReport(reportData);
+        setRecentEvents(eventsData.events);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown dashboard error");
       } finally {
@@ -161,6 +175,22 @@ export default function App() {
     const timer = window.setInterval(load, 15000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const source = new EventSource("/api/events/stream?limit=8&interval_seconds=5");
+    source.addEventListener("recent_events", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as RecentEventsPayload;
+      setRecentEvents(payload.events);
+    });
+    source.onerror = () => {
+      source.close();
+    };
+    return () => source.close();
+  }, []);
+
+  const visibleEvents = recentEvents.length
+    ? recentEvents.map((item) => `${item.logged_at} | ${item.event_type}`)
+    : report?.items ?? [];
 
   return (
     <div className="app-shell">
@@ -298,11 +328,11 @@ export default function App() {
         <article className="panel">
           <div className="panel-header">
             <h2>Recent Log</h2>
-            <span>{report?.summary || "n/a"}</span>
+            <span>{recentEvents.length ? `${recentEvents.length} streamed events` : report?.summary || "n/a"}</span>
           </div>
           <ul className="event-list">
-            {(report?.items ?? []).slice(0, 8).map((item, index) => (
-              <li key={`${report?.session_id}-${index}`}>{item}</li>
+            {visibleEvents.slice(0, 8).map((item, index) => (
+              <li key={`${report?.session_id ?? "events"}-${index}`}>{item}</li>
             ))}
           </ul>
         </article>

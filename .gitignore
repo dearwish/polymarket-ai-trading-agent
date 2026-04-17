@@ -11,6 +11,7 @@ dist/
 build/
 web/node_modules/
 web/dist/
+web/*.tsbuildinfo
 *.egg-info/
 .DS_Store
 logs/

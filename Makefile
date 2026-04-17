@@ -126,7 +126,7 @@ help:
 		'  make doctor                   Run the combined read-only account/market/simulation diagnostic' \
 		'  make api-dev                  Run the FastAPI operator backend on http://127.0.0.1:8000' \
 		'  make web-install              Install the React dashboard dependencies' \
-		'  make web-dev                  Run the React dashboard on http://127.0.0.1:5173' \
+		'  make web-dev                  Run the React dashboard on http://127.0.0.1:5180' \
 		'  make web-build                Build the React dashboard for production' \
 		'  make live-preflight           Run the live-readiness preflight without posting orders' \
 		'  make live-activity            Run the top-level live activity snapshot (preflight, orders, trades)' \

@@ -160,6 +160,23 @@ def test_api_report() -> None:
     assert response.json()["summary"] == "ok"
 
 
+def test_api_recent_events() -> None:
+    class ServiceWithEvents(StubService):
+        class Journal:
+            @staticmethod
+            def read_recent_events(limit=20):
+                return [{"event_type": "simulation_cycle", "logged_at": "2026-04-17T00:00:00+00:00", "payload": {"market_id": "123"}}]
+
+        journal = Journal()
+
+    client = TestClient(create_app(lambda: ServiceWithEvents()))
+    response = client.get("/api/events/recent")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["events"][0]["event_type"] == "simulation_cycle"
+
+
 def test_api_simulate_active() -> None:
     client = TestClient(create_app(lambda: StubService()))
     response = client.get("/api/simulate")

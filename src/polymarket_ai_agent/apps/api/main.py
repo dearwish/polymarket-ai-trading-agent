@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Callable
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from polymarket_ai_agent.config import get_settings
 from polymarket_ai_agent.service import AgentService
@@ -23,8 +26,8 @@ def create_app(service_factory: Callable[[], AgentService] = get_service) -> Fas
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
+            "http://127.0.0.1:5180",
+            "http://localhost:5180",
         ],
         allow_credentials=True,
         allow_methods=["*"],
@@ -107,6 +110,32 @@ def create_app(service_factory: Callable[[], AgentService] = get_service) -> Fas
             "summary": generated.summary,
             "items": generated.items,
         }
+
+    @app.get("/api/events/recent")
+    def recent_events(limit: int = Query(20, ge=1, le=200), service: AgentService = Depends(service_factory)) -> dict:
+        events = service.journal.read_recent_events(limit=limit)
+        return {
+            "count": len(events),
+            "events": events,
+        }
+
+    @app.get("/api/events/stream")
+    async def stream_events(
+        limit: int = Query(12, ge=1, le=100),
+        interval_seconds: int = Query(5, ge=1, le=60),
+        service: AgentService = Depends(service_factory),
+    ) -> StreamingResponse:
+        async def event_generator():
+            previous_payload = ""
+            while True:
+                events = service.journal.read_recent_events(limit=limit)
+                payload = json.dumps({"count": len(events), "events": events})
+                if payload != previous_payload:
+                    previous_payload = payload
+                    yield f"event: recent_events\ndata: {payload}\n\n"
+                await asyncio.sleep(interval_seconds)
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.get("/api/portfolio/summary")
     def portfolio_summary(service: AgentService = Depends(service_factory)) -> dict:
