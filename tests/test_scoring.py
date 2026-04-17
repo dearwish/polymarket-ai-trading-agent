@@ -179,6 +179,29 @@ def test_scoring_engine_normalizes_buy_yes_style_side(settings, market_snapshot)
     assert assessment.suggested_side == SuggestedSide.YES
 
 
+def test_scoring_engine_normalizes_plain_buy_side(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(
+        configured,
+        client=DummyClient(
+            content=json.dumps(
+                {
+                    "fair_probability": 0.72,
+                    "confidence": "high",
+                    "reasons_for_trade": ["Positive edge detected."],
+                    "reasons_to_abstain": [],
+                    "expiry_risk": "LOW",
+                    "suggested_side": "buy",
+                }
+            )
+        ),
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.edge > 0
+    assert assessment.suggested_side == SuggestedSide.YES
+
+
 def test_scoring_engine_normalizes_no_trade_to_abstain(settings, market_snapshot) -> None:
     packet = ResearchEngine().build_evidence_packet(market_snapshot)
     configured = settings.model_copy(update={"openrouter_api_key": "test-key"})

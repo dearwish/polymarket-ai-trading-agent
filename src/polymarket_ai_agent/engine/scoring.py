@@ -168,8 +168,8 @@ class ScoringEngine:
         if not text:
             raise ValueError("suggested_side is empty")
         compact = re.sub(r"[^a-z]+", " ", text).strip()
-        yes_tokens = {"yes", "buy yes", "long yes"}
-        no_tokens = {"no", "buy no", "sell yes", "short yes", "long no"}
+        yes_tokens = {"yes", "buy", "buy yes", "long", "long yes"}
+        no_tokens = {"no", "sell", "buy no", "sell yes", "sell no", "short", "short yes", "long no"}
         abstain_tokens = {
             "abstain",
             "avoid",
