@@ -8,20 +8,21 @@ Python project for a Polymarket trading agent with three clearly separated layer
 
 ## Current Status
 
-The repository now includes a working paper and read-only live-readiness stack:
+The repository now includes a working paper and read-only live-readiness stack, plus Phase 1 of an event-driven market-data core targeting btc_1h / btc_15m / btc_5m trading (see [`docs/ROADMAP.md`](./docs/ROADMAP.md)).
 
 - Python package under `src/polymarket_ai_agent`
 - operator CLI via `polymarket-ai-agent`
 - settings/config loading from `.env`
 - Polymarket market discovery and order book snapshot connector
 - authenticated read-only Polymarket account diagnostics
-- external BTC price feed connector
+- external BTC price feed connector (REST + websocket)
 - research, scoring, risk, execution, and journaling engines
 - paper trading and read-only simulation flows
 - hard-gated live execution path
 - live preflight and live order inspection commands
 - SQLite and JSONL logging
-- test suite covering connectors, scoring, risk, execution, service, and CLI
+- **event-driven asyncio daemon** with Polymarket CLOB + Binance BTC websocket subscriptions, rolling per-market and BTC state, and a pluggable decision callback (Phase 1 journals features; Phase 2 adds the quant scorer)
+- test suite covering connectors, scoring, risk, execution, service, CLI, and the new state/daemon/feed modules
 
 Important:
 
@@ -54,6 +55,8 @@ make live-orders
 make simulate-active
 make simulate-market MARKET_ID=123
 make simulate-loop-active ITERATIONS=3 INTERVAL=0
+make daemon-smoke   # 15s smoke test of the event-driven daemon
+make daemon         # run the event-driven daemon (Ctrl+C to stop)
 ```
 
 ## Operator Workflow
@@ -159,8 +162,32 @@ The first version is intentionally narrow:
 ## Files
 
 - [`PLAN.md`](./PLAN.md)
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md)
 - [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
 - [`.gitignore`](./.gitignore)
+
+## Event-Driven Daemon (Phase 1)
+
+The daemon replaces synchronous REST polling on the hot path with websocket-driven state:
+
+- subscribes to Polymarket CLOB market deltas for discovered btc_1h / btc_15m / btc_5m tokens
+- subscribes to Binance `aggTrade` + `bookTicker` for live BTC price, with a REST seed + fallback
+- maintains in-memory `MarketState` (microprice, top-5 imbalance, trade tape, signed flow) and `BtcState` (log returns at 10s/1m/5m/15m, EWMA realized vol)
+- auto-reconnects with exponential backoff on disconnect
+- exposes a pluggable `decision_callback` — Phase 2 installs the quant fair-value scorer here
+
+Configure via `.env` (see `.env.example`):
+
+```env
+POLYMARKET_WS_MARKET_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
+POLYMARKET_WS_USER_URL=wss://ws-subscriptions-clob.polymarket.com/ws/user
+BTC_WS_URL=wss://stream.binance.com:9443/stream
+BTC_SYMBOL=btcusdt
+WS_RECONNECT_BACKOFF_SECONDS=2.0
+WS_RECONNECT_BACKOFF_MAX_SECONDS=30.0
+DAEMON_DISCOVERY_INTERVAL_SECONDS=60
+DAEMON_DECISION_MIN_INTERVAL_SECONDS=1.0
+```
 
 ## Deployment Recommendation
 
