@@ -156,6 +156,52 @@ def test_scoring_engine_aligns_side_with_negative_edge(settings, market_snapshot
     assert assessment.suggested_side == SuggestedSide.NO
 
 
+def test_scoring_engine_normalizes_buy_yes_style_side(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(
+        configured,
+        client=DummyClient(
+            content=json.dumps(
+                {
+                    "fair_probability": 0.70,
+                    "confidence": "high",
+                    "reasons_for_trade": ["Positive edge detected."],
+                    "reasons_to_abstain": [],
+                    "expiry_risk": "LOW",
+                    "suggested_side": "buy-yes",
+                }
+            )
+        ),
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.edge > 0
+    assert assessment.suggested_side == SuggestedSide.YES
+
+
+def test_scoring_engine_normalizes_no_trade_to_abstain(settings, market_snapshot) -> None:
+    packet = ResearchEngine().build_evidence_packet(market_snapshot)
+    configured = settings.model_copy(update={"openrouter_api_key": "test-key"})
+    engine = ScoringEngine(
+        configured,
+        client=DummyClient(
+            content=json.dumps(
+                {
+                    "fair_probability": packet.market_probability,
+                    "confidence": "medium",
+                    "reasons_for_trade": [],
+                    "reasons_to_abstain": ["No edge."],
+                    "expiry_risk": "LOW",
+                    "suggested_side": "no trade",
+                }
+            )
+        ),
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.edge == 0.0
+    assert assessment.suggested_side == SuggestedSide.ABSTAIN
+
+
 def test_scoring_engine_out_of_range_probability_abstains(settings, market_snapshot) -> None:
     packet = ResearchEngine().build_evidence_packet(market_snapshot)
     configured = settings.model_copy(update={"openrouter_api_key": "test-key"})

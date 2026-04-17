@@ -167,12 +167,24 @@ class ScoringEngine:
         text = str(value).strip().lower()
         if not text:
             raise ValueError("suggested_side is empty")
-        if text.startswith("yes"):
-            return SuggestedSide.YES
-        if text.startswith("no"):
-            return SuggestedSide.NO
-        if text.startswith("abstain") or text.startswith("avoid") or text.startswith("hold") or text.startswith("skip"):
+        compact = re.sub(r"[^a-z]+", " ", text).strip()
+        yes_tokens = {"yes", "buy yes", "long yes"}
+        no_tokens = {"no", "buy no", "sell yes", "short yes", "long no"}
+        abstain_tokens = {
+            "abstain",
+            "avoid",
+            "hold",
+            "skip",
+            "no trade",
+            "do not trade",
+            "pass",
+        }
+        if compact in abstain_tokens:
             return SuggestedSide.ABSTAIN
+        if compact in yes_tokens or re.search(r"\byes\b", compact):
+            return SuggestedSide.YES
+        if compact in no_tokens or re.search(r"\bno\b", compact):
+            return SuggestedSide.NO
         raise ValueError(f"Unrecognized suggested_side value: {value}")
 
     @staticmethod
