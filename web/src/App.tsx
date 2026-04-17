@@ -8,6 +8,9 @@ type StatusPayload = {
   live_trading_enabled: boolean;
   open_positions: number;
   available_usd: number;
+  paper_available_usd: number;
+  funded_balance_usd: number | null;
+  available_usd_source: string;
   daily_realized_pnl: number;
   rejected_orders: number;
 };
@@ -214,6 +217,21 @@ function formatPct(value: number | null | undefined): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function formatDuration(totalSeconds: number | null | undefined): string {
+  if (totalSeconds === null || totalSeconds === undefined) return "n/a";
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const parts: string[] = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  if (!parts.length || remainingSeconds) parts.push(`${remainingSeconds}s`);
+  return parts.join(" ");
+}
+
 function shortText(value: string | undefined, limit = 88): string {
   if (!value) return "n/a";
   return value.length > limit ? `${value.slice(0, limit)}...` : value;
@@ -321,6 +339,7 @@ function OverviewPage({ state }: { state: DashboardState }) {
             <div><dt>Mode</dt><dd>{status?.trading_mode || "n/a"}</dd></div>
             <div><dt>Market Family</dt><dd>{status?.market_family || "n/a"}</dd></div>
             <div><dt>Available USD</dt><dd>{formatMoney(status?.available_usd)}</dd></div>
+            <div><dt>Balance Source</dt><dd>{status?.available_usd_source === "funded_balance" ? "Polymarket" : "Paper"}</dd></div>
             <div><dt>Rejected Orders</dt><dd>{status?.rejected_orders ?? 0}</dd></div>
           </dl>
         </article>
@@ -339,7 +358,7 @@ function OverviewPage({ state }: { state: DashboardState }) {
           <h2>Last Poll</h2>
           <p>{liveActivity?.preflight.market.question || "n/a"}</p>
           <dl>
-            <div><dt>Time Remaining</dt><dd>{liveActivity ? `${liveActivity.last_poll.time_remaining_minutes.toFixed(1)} min` : "n/a"}</dd></div>
+            <div><dt>Time Remaining</dt><dd>{formatDuration(liveActivity?.last_poll.time_remaining_seconds)}</dd></div>
             <div><dt>Yes Trades</dt><dd>{liveActivity?.last_poll.trade_counts.yes ?? 0}</dd></div>
             <div><dt>No Trades</dt><dd>{liveActivity?.last_poll.trade_counts.no ?? 0}</dd></div>
             <div><dt>Total Trades</dt><dd>{liveActivity?.last_poll.trade_counts.total ?? 0}</dd></div>
@@ -372,7 +391,7 @@ function OverviewPage({ state }: { state: DashboardState }) {
             </div>
             <div>
               <label>Time Remaining</label>
-              <strong>{liveActivity ? `${Math.max(liveActivity.last_poll.time_remaining_seconds, 0)}s` : "n/a"}</strong>
+              <strong>{formatDuration(liveActivity?.last_poll.time_remaining_seconds)}</strong>
             </div>
             <div>
               <label>Tracked Orders</label>

@@ -389,6 +389,8 @@ class AgentService:
         auth_status = self.polymarket.probe_live_readiness()
         account_state = self.portfolio.get_account_state(ExecutionMode(self.settings.trading_mode))
         safety_stop_reason = self.safety_stop_reason(account_state)
+        funded_balance = auth_status.balance if auth_status.balance is not None else None
+        effective_available_usd = funded_balance if auth_status.readonly_ready and funded_balance is not None else account_state.available_usd
         return {
             "trading_mode": self.settings.trading_mode,
             "market_family": self.settings.market_family,
@@ -398,7 +400,10 @@ class AgentService:
             "db_path": str(self.settings.db_path),
             "events_path": str(self.settings.events_path),
             "open_positions": account_state.open_positions,
-            "available_usd": account_state.available_usd,
+            "available_usd": effective_available_usd,
+            "paper_available_usd": account_state.available_usd,
+            "funded_balance_usd": funded_balance,
+            "available_usd_source": "funded_balance" if effective_available_usd == funded_balance and funded_balance is not None else "paper_balance",
             "daily_realized_pnl": account_state.daily_realized_pnl,
             "rejected_orders": account_state.rejected_orders,
             "daily_loss_limit_reached": account_state.daily_realized_pnl <= -self.settings.max_daily_loss_usd,

@@ -25,6 +25,41 @@ def test_agent_service_status(settings) -> None:
     assert "auth" in status
     assert "probe_attempted" in status["auth"]
     assert "readonly_ready" in status["auth"]
+    assert "paper_available_usd" in status
+    assert "funded_balance_usd" in status
+    assert "available_usd_source" in status
+
+
+def test_agent_service_status_prefers_funded_balance_when_auth_ready(settings) -> None:
+    service = AgentService(settings)
+    service.polymarket.probe_live_readiness = lambda: type(
+        "Auth",
+        (),
+        {
+            "private_key_configured": True,
+            "funder_configured": True,
+            "signature_type": 2,
+            "live_client_constructible": True,
+            "missing": [],
+            "wallet_address": "0xabc",
+            "api_credentials_derived": True,
+            "server_ok": True,
+            "readonly_ready": True,
+            "probe_attempted": True,
+            "collateral_address": "0x2791",
+            "balance": 44.93,
+            "allowance": None,
+            "open_orders_count": 0,
+            "open_orders_markets": [],
+            "diagnostics_collected": True,
+            "errors": [],
+        },
+    )()
+    status = service.status()
+    assert status["available_usd"] == 44.93
+    assert status["paper_available_usd"] == settings.paper_starting_balance_usd
+    assert status["funded_balance_usd"] == 44.93
+    assert status["available_usd_source"] == "funded_balance"
 
 
 def test_agent_service_discover_markets_logs(settings, market_candidate) -> None:
