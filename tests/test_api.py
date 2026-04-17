@@ -285,3 +285,14 @@ def test_api_equity_curve() -> None:
     payload = response.json()
     assert payload["count"] == 1
     assert payload["points"][0]["equity"] == 3.75
+
+
+def test_api_dashboard_snapshot() -> None:
+    client = TestClient(create_app(lambda: StubService()))
+    response = client.get("/api/dashboard")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"]["trading_mode"] == "paper"
+    assert payload["auth"]["readonly_ready"] is True
+    assert payload["live_activity"]["market_id"] == "active-123"
+    assert payload["recent_events"]["count"] == 2

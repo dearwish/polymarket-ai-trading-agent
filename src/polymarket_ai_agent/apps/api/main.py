@@ -38,6 +38,21 @@ def create_app(service_factory: Callable[[], AgentService] = get_service) -> Fas
     def health() -> dict:
         return {"ok": True}
 
+    def build_dashboard_snapshot(service: AgentService) -> dict:
+        return {
+            "status": service.status(),
+            "auth": service.auth_status(),
+            "live_activity": service.live_activity(),
+            "portfolio_summary": portfolio_summary(service=service),
+            "closed_positions": closed_positions(limit=100, service=service),
+            "equity_curve": equity_curve(limit=200, service=service),
+            "report": report(session_id=None, service=service),
+            "recent_events": recent_events(limit=12, service=service),
+            "recent_decisions": recent_decisions(limit=20, service=service),
+            "live_orders": live_orders(service=service),
+            "live_trades": live_trades(limit=20, service=service),
+        }
+
     @app.get("/api/status")
     def status(service: AgentService = Depends(service_factory)) -> dict:
         return service.status()
@@ -210,6 +225,26 @@ def create_app(service_factory: Callable[[], AgentService] = get_service) -> Fas
                 }
             )
         return {"count": len(points), "points": points}
+
+    @app.get("/api/dashboard")
+    def dashboard(service: AgentService = Depends(service_factory)) -> dict:
+        return build_dashboard_snapshot(service)
+
+    @app.get("/api/dashboard/stream")
+    async def dashboard_stream(
+        interval_seconds: int = Query(5, ge=1, le=60),
+        service: AgentService = Depends(service_factory),
+    ) -> StreamingResponse:
+        async def event_generator():
+            previous_payload = ""
+            while True:
+                payload = json.dumps(build_dashboard_snapshot(service))
+                if payload != previous_payload:
+                    previous_payload = payload
+                    yield f"event: dashboard\ndata: {payload}\n\n"
+                await asyncio.sleep(interval_seconds)
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.get("/api/simulate")
     def simulate(

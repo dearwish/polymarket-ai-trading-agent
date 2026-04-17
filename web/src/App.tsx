@@ -174,6 +174,20 @@ type DashboardState = {
   liveTrades: LiveTrade[];
 };
 
+type DashboardSnapshotPayload = {
+  status: StatusPayload;
+  auth: AuthPayload;
+  live_activity: LiveActivityPayload;
+  portfolio_summary: PortfolioSummaryPayload;
+  closed_positions: ClosedPositionsPayload;
+  equity_curve: EquityCurvePayload;
+  report: ReportPayload;
+  recent_events: RecentEventsPayload;
+  recent_decisions: DecisionsPayload;
+  live_orders: LiveOrdersPayload;
+  live_trades: LiveTradesPayload;
+};
+
 const VIEWS: Array<{ key: ViewKey; label: string }> = [
   { key: "overview", label: "Overview" },
   { key: "decisions", label: "Decisions" },
@@ -215,6 +229,22 @@ function eventPayloadSummary(payload: Record<string, unknown>): string {
 function getInitialView(): ViewKey {
   const hash = window.location.hash.replace("#", "") as ViewKey;
   return VIEWS.some((item) => item.key === hash) ? hash : "overview";
+}
+
+function mapSnapshotToState(snapshot: DashboardSnapshotPayload): DashboardState {
+  return {
+    status: snapshot.status,
+    auth: snapshot.auth,
+    liveActivity: snapshot.live_activity,
+    portfolioSummary: snapshot.portfolio_summary,
+    closedPositions: snapshot.closed_positions,
+    equityCurve: snapshot.equity_curve,
+    report: snapshot.report,
+    recentEvents: snapshot.recent_events.events,
+    recentDecisions: snapshot.recent_decisions.decisions,
+    liveOrders: snapshot.live_orders.orders,
+    liveTrades: snapshot.live_trades.trades,
+  };
 }
 
 function PnlChart({ points }: { points: EquityPoint[] }) {
@@ -637,44 +667,8 @@ export default function App() {
       setLoading(true);
       setError("");
       try {
-        const [
-          status,
-          auth,
-          liveActivity,
-          portfolioSummary,
-          closedPositions,
-          equityCurve,
-          report,
-          recentEvents,
-          recentDecisions,
-          liveOrders,
-          liveTrades,
-        ] = await Promise.all([
-          fetchJson<StatusPayload>("/api/status"),
-          fetchJson<AuthPayload>("/api/auth"),
-          fetchJson<LiveActivityPayload>("/api/live/activity"),
-          fetchJson<PortfolioSummaryPayload>("/api/portfolio/summary"),
-          fetchJson<ClosedPositionsPayload>("/api/portfolio/closed-positions"),
-          fetchJson<EquityCurvePayload>("/api/portfolio/equity-curve"),
-          fetchJson<ReportPayload>("/api/report"),
-          fetchJson<RecentEventsPayload>("/api/events/recent?limit=12"),
-          fetchJson<DecisionsPayload>("/api/decisions/recent?limit=20"),
-          fetchJson<LiveOrdersPayload>("/api/live/orders"),
-          fetchJson<LiveTradesPayload>("/api/live/trades?limit=20"),
-        ]);
-        setState({
-          status,
-          auth,
-          liveActivity,
-          portfolioSummary,
-          closedPositions,
-          equityCurve,
-          report,
-          recentEvents: recentEvents.events,
-          recentDecisions: recentDecisions.decisions,
-          liveOrders: liveOrders.orders,
-          liveTrades: liveTrades.trades,
-        });
+        const snapshot = await fetchJson<DashboardSnapshotPayload>("/api/dashboard");
+        setState(mapSnapshotToState(snapshot));
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown dashboard error");
       } finally {
@@ -683,18 +677,23 @@ export default function App() {
     }
 
     load();
-    const timer = window.setInterval(load, 15000);
-    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
-    const source = new EventSource("/api/events/stream?limit=12&interval_seconds=5");
-    source.addEventListener("recent_events", (event) => {
-      const payload = JSON.parse((event as MessageEvent).data) as RecentEventsPayload;
-      setState((current) => ({ ...current, recentEvents: payload.events }));
+    const source = new EventSource("/api/dashboard/stream?interval_seconds=5");
+    source.addEventListener("dashboard", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as DashboardSnapshotPayload;
+      setState(mapSnapshotToState(payload));
+      setLoading(false);
+      setError("");
     });
-    source.onerror = () => source.close();
-    return () => source.close();
+    source.onerror = () => {
+      setError("Dashboard stream disconnected.");
+      source.close();
+    };
+    return () => {
+      source.close();
+    };
   }, []);
 
   const currentView = useMemo(() => {
