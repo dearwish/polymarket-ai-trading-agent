@@ -122,6 +122,13 @@ class StubService:
             "order": {"order_id": order_id, "status": "OPEN"},
         }
 
+    def cancel_live_order(self, order_id):
+        return {
+            "readonly": False,
+            "order": {"order_id": order_id, "status": "OPEN"},
+            "cancellation": {"order_id": order_id, "success": True},
+        }
+
     def safety_stop_reason(self):
         return None
 
@@ -245,6 +252,20 @@ def test_cli_live_order(monkeypatch) -> None:
     result = runner.invoke(app, ["live-order", "live-1"])
     assert result.exit_code == 0
     assert "\"order_id\": \"live-1\"" in result.stdout
+
+
+def test_cli_live_cancel_requires_confirm(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["live-cancel", "live-1"])
+    assert result.exit_code == 1
+    assert "confirm-cancel" in result.stdout
+
+
+def test_cli_live_cancel(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["live-cancel", "live-1", "--confirm-cancel"])
+    assert result.exit_code == 0
+    assert "\"success\": true" in result.stdout
 
 
 def test_cli_live_requires_confirm(monkeypatch) -> None:

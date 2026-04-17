@@ -429,6 +429,20 @@ class AgentService:
             "order": order,
         }
 
+    def cancel_live_order(self, order_id: str) -> dict:
+        auth = self._auth_status_dict(self.polymarket.probe_live_readiness())
+        if not auth["readonly_ready"]:
+            raise RuntimeError("Authenticated live order cancellation requires readonly_ready auth.")
+        order = self.polymarket.get_live_order(order_id)
+        result = self.polymarket.cancel_live_order(order_id)
+        payload = {
+            "readonly": False,
+            "order": order,
+            "cancellation": result,
+        }
+        self.journal.log_event("live_order_cancel", payload)
+        return payload
+
     def safety_stop_reason(self, account_state: AccountState | None = None) -> str | None:
         state = account_state or self.portfolio.get_account_state(ExecutionMode(self.settings.trading_mode))
         if state.daily_realized_pnl <= -self.settings.max_daily_loss_usd:

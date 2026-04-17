@@ -9,7 +9,7 @@ CLI := $(BIN)/polymarket-ai-agent
 ITERATIONS ?= 10
 INTERVAL ?= 15
 
-.PHONY: help venv install bootstrap reinstall bootstrap-force test status auth-check doctor live-preflight live-orders check report \
+.PHONY: help venv install bootstrap reinstall bootstrap-force test status auth-check doctor live-preflight live-orders live-cancel check report \
 	simulate-active simulate-market simulate-loop-active simulate-loop-market \
 	guard-market-id
 
@@ -50,6 +50,9 @@ live-preflight: install
 live-orders: install
 	$(CLI) live-orders
 
+live-cancel: install guard-order-id
+	$(CLI) live-cancel $(ORDER_ID) --confirm-cancel
+
 check: test status auth-check
 
 report: install
@@ -61,6 +64,12 @@ simulate-active: install
 guard-market-id:
 	@if [ -z "$(MARKET_ID)" ]; then \
 		echo "MARKET_ID is required. Usage: make simulate-market MARKET_ID=123"; \
+		exit 1; \
+	fi
+
+guard-order-id:
+	@if [ -z "$(ORDER_ID)" ]; then \
+		echo "ORDER_ID is required. Usage: make live-cancel ORDER_ID=abc123"; \
 		exit 1; \
 	fi
 
@@ -87,6 +96,8 @@ help:
 		'  make doctor                   Run the combined read-only account/market/simulation diagnostic' \
 		'  make live-preflight           Run the live-readiness preflight without posting orders' \
 		'  make live-orders              Inspect authenticated open live orders without posting new ones' \
+		'  make live-cancel ORDER_ID=abc123' \
+		'                               Cancel a specific live order with explicit confirmation' \
 		'  make check                    Run test, status, and auth-check' \
 		'  make report                   Run the CLI report command' \
 		'  make simulate-active          Run a read-only simulation on the active market' \
@@ -101,5 +112,6 @@ help:
 		'  PYTHON      Python executable to use (default: python3)' \
 		'  VENV        Virtualenv directory (default: .venv)' \
 		'  MARKET_ID   Required for simulate-market and simulate-loop-market' \
+		'  ORDER_ID    Required for live-cancel' \
 		'  ITERATIONS  Simulation loop iterations (default: 10)' \
 		'  INTERVAL    Seconds between simulation iterations (default: 15)'

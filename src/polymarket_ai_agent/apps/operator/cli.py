@@ -222,6 +222,20 @@ def live_order(order_id: str) -> None:
         _handle_operator_error(exc)
 
 
+@app.command("live-cancel")
+def live_cancel(
+    order_id: str,
+    confirm_cancel: bool = typer.Option(False, "--confirm-cancel"),
+) -> None:
+    try:
+        if not confirm_cancel:
+            raise ValueError("Refusing live cancellation without --confirm-cancel.")
+        service = _service()
+        console.print_json(json.dumps(service.cancel_live_order(order_id)))
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
 @app.command()
 def live(
     market_id: str = typer.Argument("", help="Explicit market id to trade live."),

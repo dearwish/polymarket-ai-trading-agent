@@ -188,6 +188,11 @@ class PolymarketConnector:
         client = self._build_authed_live_client()
         return self._normalize_live_order(client.get_order(order_id))
 
+    def cancel_live_order(self, order_id: str) -> dict[str, Any]:
+        client = self._build_authed_live_client()
+        response = client.cancel_orders([order_id])
+        return self._normalize_cancel_response(order_id, response)
+
     def _build_authed_live_client(self) -> ClobClient:
         client = self.build_live_client()
         creds = client.create_or_derive_api_creds()
@@ -338,6 +343,31 @@ class PolymarketConnector:
             "size_matched": remaining,
             "created_at": str(order.get("created_at") or order.get("createdAt") or ""),
             "raw": order,
+        }
+
+    @staticmethod
+    def _normalize_cancel_response(order_id: str, response: Any) -> dict[str, Any]:
+        if isinstance(response, dict):
+            canceled = response.get("canceled") or response.get("cancelled") or response.get("data")
+            if isinstance(canceled, list):
+                success = order_id in {str(item) for item in canceled}
+            else:
+                success = bool(response.get("success") or response.get("ok") or canceled)
+            return {
+                "order_id": order_id,
+                "success": success,
+                "response": response,
+            }
+        if isinstance(response, list):
+            return {
+                "order_id": order_id,
+                "success": order_id in {str(item) for item in response},
+                "response": response,
+            }
+        return {
+            "order_id": order_id,
+            "success": False,
+            "response": response,
         }
 
     @staticmethod

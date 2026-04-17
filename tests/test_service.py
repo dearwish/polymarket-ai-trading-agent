@@ -525,3 +525,35 @@ def test_agent_service_live_order_status(settings) -> None:
     service.polymarket.get_live_order = lambda order_id: {"order_id": order_id, "status": "OPEN"}
     payload = service.live_order_status("live-1")
     assert payload["order"]["order_id"] == "live-1"
+
+
+def test_agent_service_cancel_live_order(settings) -> None:
+    service = AgentService(settings)
+    service.polymarket.probe_live_readiness = lambda: type(
+        "Auth",
+        (),
+        {
+            "private_key_configured": True,
+            "funder_configured": True,
+            "signature_type": 2,
+            "live_client_constructible": True,
+            "missing": [],
+            "wallet_address": "0xdef",
+            "api_credentials_derived": True,
+            "server_ok": True,
+            "readonly_ready": True,
+            "probe_attempted": True,
+            "collateral_address": "0x2791",
+            "balance": 44.93,
+            "allowance": None,
+            "open_orders_count": 1,
+            "open_orders_markets": ["m1"],
+            "diagnostics_collected": True,
+            "errors": [],
+        },
+    )()
+    service.polymarket.get_live_order = lambda order_id: {"order_id": order_id, "status": "OPEN"}
+    service.polymarket.cancel_live_order = lambda order_id: {"order_id": order_id, "success": True}
+    payload = service.cancel_live_order("live-1")
+    assert payload["order"]["order_id"] == "live-1"
+    assert payload["cancellation"]["success"] is True

@@ -440,6 +440,31 @@ def test_polymarket_connector_gets_single_live_order(settings) -> None:
     assert order["size"] == 20.0
 
 
+def test_polymarket_connector_cancels_live_order(settings) -> None:
+    configured = settings.model_copy(
+        update={
+            "polymarket_private_key": "0x" + "1" * 64,
+        }
+    )
+    connector = PolymarketConnector(configured, client=DummyClient([]))
+
+    class StubLiveClient:
+        def create_or_derive_api_creds(self):
+            return {"key": "derived"}
+
+        def set_api_creds(self, creds):
+            self.creds = creds
+
+        def cancel_orders(self, order_ids):
+            assert order_ids == ["live-1"]
+            return {"canceled": ["live-1"]}
+
+    connector.build_live_client = lambda: StubLiveClient()
+    result = connector.cancel_live_order("live-1")
+    assert result["order_id"] == "live-1"
+    assert result["success"] is True
+
+
 def test_polymarket_connector_discovers_btc_daily_threshold_markets(settings) -> None:
     configured = settings.model_copy(update={"market_family": "btc_daily_threshold"})
     payload = [
