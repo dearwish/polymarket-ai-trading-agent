@@ -311,5 +311,11 @@ class AgentService:
             "server_ok": auth_status.server_ok,
             "readonly_ready": auth_status.readonly_ready,
             "probe_attempted": auth_status.probe_attempted,
+            "collateral_address": auth_status.collateral_address,
+            "balance": auth_status.balance,
+            "allowance": auth_status.allowance,
+            "open_orders_count": auth_status.open_orders_count,
+            "open_orders_markets": auth_status.open_orders_markets,
+            "diagnostics_collected": auth_status.diagnostics_collected,
             "errors": auth_status.errors,
         }

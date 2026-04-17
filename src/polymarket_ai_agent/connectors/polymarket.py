@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import BalanceAllowanceParams, OpenOrderParams
 
 from polymarket_ai_agent.config import Settings
 from polymarket_ai_agent.types import AuthStatus, MarketCandidate, OrderBookSnapshot
@@ -101,6 +102,8 @@ class PolymarketConnector:
             status.api_credentials_derived = True
             status.server_ok = bool(client.get_ok())
             status.readonly_ready = status.api_credentials_derived and status.server_ok
+            if status.readonly_ready:
+                self._collect_account_diagnostics(client, status)
         except Exception as exc:
             status.errors.append(str(exc))
         return status
@@ -117,6 +120,26 @@ class PolymarketConnector:
             signature_type=self.settings.polymarket_signature_type,
             funder=funder,
         )
+
+    def _collect_account_diagnostics(self, client: ClobClient, status: AuthStatus) -> None:
+        try:
+            status.collateral_address = str(client.get_collateral_address() or "")
+        except Exception as exc:
+            status.errors.append(f"collateral_address: {exc}")
+        try:
+            balance_payload = client.get_balance_allowance(BalanceAllowanceParams())
+            balance, allowance = self._extract_balance_allowance(balance_payload)
+            status.balance = balance
+            status.allowance = allowance
+        except Exception as exc:
+            status.errors.append(f"balance_allowance: {exc}")
+        try:
+            orders = client.get_orders(OpenOrderParams())
+            status.open_orders_count = len(orders)
+            status.open_orders_markets = self._extract_open_order_markets(orders)
+        except Exception as exc:
+            status.errors.append(f"open_orders: {exc}")
+        status.diagnostics_collected = True
 
     def estimate_seconds_to_expiry(self, end_date_iso: str) -> int:
         try:
@@ -202,6 +225,63 @@ class PolymarketConnector:
         if self.settings.market_family in {"btc_5m", "btc_daily_threshold"}:
             return max(requested_limit, 200)
         return requested_limit
+
+    @staticmethod
+    def _extract_balance_allowance(payload: Any) -> tuple[float | None, float | None]:
+        if not isinstance(payload, dict):
+            return None, None
+        balance = PolymarketConnector._extract_first_float(
+            payload,
+            [
+                ("balance",),
+                ("balance", "balance"),
+                ("balance", "available"),
+                ("available",),
+            ],
+        )
+        allowance = PolymarketConnector._extract_first_float(
+            payload,
+            [
+                ("allowance",),
+                ("allowance", "allowance"),
+                ("allowance", "available"),
+            ],
+        )
+        return balance, allowance
+
+    @staticmethod
+    def _extract_first_float(payload: dict[str, Any], paths: list[tuple[str, ...]]) -> float | None:
+        for path in paths:
+            current: Any = payload
+            for part in path:
+                if not isinstance(current, dict) or part not in current:
+                    current = None
+                    break
+                current = current[part]
+            if current is None:
+                continue
+            try:
+                return float(current)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _extract_open_order_markets(orders: list[Any]) -> list[str]:
+        markets: set[str] = set()
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            market = (
+                order.get("market")
+                or order.get("market_id")
+                or order.get("condition_id")
+                or order.get("asset_id")
+                or ""
+            )
+            if market:
+                markets.add(str(market))
+        return sorted(markets)[:10]
 
     @staticmethod
     def _btc_5m_match_score(question: str, description: str, slug: str) -> int:

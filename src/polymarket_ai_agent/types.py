@@ -170,6 +170,12 @@ class AuthStatus:
     server_ok: bool = False
     readonly_ready: bool = False
     probe_attempted: bool = False
+    collateral_address: str = ""
+    balance: float | None = None
+    allowance: float | None = None
+    open_orders_count: int = 0
+    open_orders_markets: list[str] = field(default_factory=list)
+    diagnostics_collected: bool = False
     errors: list[str] = field(default_factory=list)
 
 

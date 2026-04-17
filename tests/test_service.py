@@ -274,12 +274,20 @@ def test_agent_service_status_reports_auth_probe(settings) -> None:
             "server_ok": True,
             "readonly_ready": True,
             "probe_attempted": True,
+            "collateral_address": "0x2791",
+            "balance": 25.0,
+            "allowance": 20.0,
+            "open_orders_count": 2,
+            "open_orders_markets": ["m1", "m2"],
+            "diagnostics_collected": True,
             "errors": [],
         },
     )()
     status = service.status()
     assert status["auth"]["wallet_address"] == "0xabc"
     assert status["auth"]["readonly_ready"] is True
+    assert status["auth"]["balance"] == 25.0
+    assert status["auth"]["open_orders_count"] == 2
 
 
 def test_agent_service_auth_status(settings) -> None:
@@ -298,9 +306,17 @@ def test_agent_service_auth_status(settings) -> None:
             "server_ok": True,
             "readonly_ready": True,
             "probe_attempted": True,
+            "collateral_address": "0x2791",
+            "balance": 10.0,
+            "allowance": 9.0,
+            "open_orders_count": 1,
+            "open_orders_markets": ["m1"],
+            "diagnostics_collected": True,
             "errors": [],
         },
     )()
     auth = service.auth_status()
     assert auth["wallet_address"] == "0xdef"
     assert auth["readonly_ready"] is True
+    assert auth["allowance"] == 9.0
+    assert auth["open_orders_markets"] == ["m1"]

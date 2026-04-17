@@ -236,6 +236,19 @@ def test_polymarket_connector_probes_live_readiness(settings) -> None:
         def get_ok(self):
             return True
 
+        def get_collateral_address(self):
+            return "0x2791"
+
+        def get_balance_allowance(self, params):
+            return {"balance": "123.45", "allowance": "98.76"}
+
+        def get_orders(self, params):
+            return [
+                {"market": "market-1"},
+                {"market_id": "market-2"},
+                {"market": "market-1"},
+            ]
+
     connector.build_live_client = lambda: StubLiveClient()
     auth = connector.probe_live_readiness()
     assert auth.probe_attempted
@@ -243,6 +256,12 @@ def test_polymarket_connector_probes_live_readiness(settings) -> None:
     assert auth.api_credentials_derived
     assert auth.server_ok
     assert auth.readonly_ready
+    assert auth.collateral_address == "0x2791"
+    assert auth.balance == 123.45
+    assert auth.allowance == 98.76
+    assert auth.open_orders_count == 3
+    assert auth.open_orders_markets == ["market-1", "market-2"]
+    assert auth.diagnostics_collected
     assert auth.errors == []
 
 
@@ -258,6 +277,47 @@ def test_polymarket_connector_captures_probe_errors(settings) -> None:
     assert auth.probe_attempted
     assert not auth.readonly_ready
     assert auth.errors == ["boom"]
+
+
+def test_polymarket_connector_collects_partial_diagnostics_with_errors(settings) -> None:
+    configured = settings.model_copy(
+        update={
+            "polymarket_private_key": "0x" + "1" * 64,
+        }
+    )
+    connector = PolymarketConnector(configured, client=DummyClient([]))
+
+    class StubLiveClient:
+        def get_address(self):
+            return "0xabc"
+
+        def create_or_derive_api_creds(self):
+            return {"key": "derived"}
+
+        def set_api_creds(self, creds):
+            self.creds = creds
+
+        def get_ok(self):
+            return True
+
+        def get_collateral_address(self):
+            raise RuntimeError("no collateral")
+
+        def get_balance_allowance(self, params):
+            return {"balance": {"available": "50"}, "allowance": {"allowance": "40"}}
+
+        def get_orders(self, params):
+            raise RuntimeError("orders unavailable")
+
+    connector.build_live_client = lambda: StubLiveClient()
+    auth = connector.probe_live_readiness()
+    assert auth.readonly_ready
+    assert auth.balance == 50.0
+    assert auth.allowance == 40.0
+    assert auth.open_orders_count == 0
+    assert auth.diagnostics_collected
+    assert "collateral_address: no collateral" in auth.errors
+    assert "open_orders: orders unavailable" in auth.errors
 
 
 def test_polymarket_connector_discovers_btc_daily_threshold_markets(settings) -> None:

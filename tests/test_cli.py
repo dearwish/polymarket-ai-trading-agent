@@ -83,7 +83,12 @@ class StubService:
         return {"trading_mode": "paper", "open_positions": 0}
 
     def auth_status(self):
-        return {"live_client_constructible": False, "readonly_ready": False}
+        return {
+            "live_client_constructible": False,
+            "readonly_ready": False,
+            "balance": None,
+            "open_orders_count": 0,
+        }
 
     def safety_stop_reason(self):
         return None
@@ -153,6 +158,7 @@ def test_cli_auth_check(monkeypatch) -> None:
     result = runner.invoke(app, ["auth-check"])
     assert result.exit_code == 0
     assert "readonly_ready" in result.stdout
+    assert "open_orders_count" in result.stdout
 
 
 def test_cli_simulate(monkeypatch) -> None:
