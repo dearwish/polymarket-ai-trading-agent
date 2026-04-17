@@ -52,6 +52,37 @@ class StubService:
             },
         )()
 
+    class Portfolio:
+        def list_open_positions(self):
+            return [type("Position", (), {"size_usd": 12.5})()]
+
+        def list_closed_positions(self, limit=100):
+            return [
+                type(
+                    "Position",
+                    (),
+                    {
+                        "market_id": "123",
+                        "side": type("Side", (), {"value": "YES"})(),
+                        "size_usd": 10.0,
+                        "entry_price": 0.4,
+                        "exit_price": 0.55,
+                        "opened_at": type("Now", (), {"isoformat": lambda self: "2026-04-17T00:00:00+00:00"})(),
+                        "closed_at": type("Now", (), {"isoformat": lambda self: "2026-04-17T01:00:00+00:00"})(),
+                        "close_reason": "manual_close",
+                        "realized_pnl": 3.75,
+                    },
+                )()
+            ]
+
+        def get_total_realized_pnl(self):
+            return 3.75
+
+        def get_daily_realized_pnl(self):
+            return 3.75
+
+    portfolio = Portfolio()
+
     def simulate_market(self, market_id):
         class Candidate:
             question = "Will BTC be above 82k?"
@@ -136,3 +167,21 @@ def test_api_simulate_active() -> None:
     payload = response.json()
     assert payload["market_id"] == "active-123"
     assert payload["decision"]["status"] == "APPROVED"
+
+
+def test_api_portfolio_summary() -> None:
+    client = TestClient(create_app(lambda: StubService()))
+    response = client.get("/api/portfolio/summary")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["open_positions"] == 1
+    assert payload["total_realized_pnl"] == 3.75
+
+
+def test_api_closed_positions() -> None:
+    client = TestClient(create_app(lambda: StubService()))
+    response = client.get("/api/portfolio/closed-positions")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["positions"][0]["cumulative_pnl"] == 3.75

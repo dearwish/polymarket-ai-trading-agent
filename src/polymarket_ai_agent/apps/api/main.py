@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from polymarket_ai_agent.config import get_settings
 from polymarket_ai_agent.service import AgentService
@@ -18,6 +19,16 @@ def create_app(service_factory: Callable[[], AgentService] = get_service) -> Fas
         title="Polymarket AI Agent API",
         version="0.1.0",
         description="Read-only operator API for monitoring Polymarket agent state, decisions, and live diagnostics.",
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     @app.get("/health")
@@ -96,6 +107,41 @@ def create_app(service_factory: Callable[[], AgentService] = get_service) -> Fas
             "summary": generated.summary,
             "items": generated.items,
         }
+
+    @app.get("/api/portfolio/summary")
+    def portfolio_summary(service: AgentService = Depends(service_factory)) -> dict:
+        open_positions = service.portfolio.list_open_positions()
+        closed_positions = service.portfolio.list_closed_positions(limit=200)
+        return {
+            "open_positions": len(open_positions),
+            "closed_positions": len(closed_positions),
+            "total_realized_pnl": service.portfolio.get_total_realized_pnl(),
+            "daily_realized_pnl": service.portfolio.get_daily_realized_pnl(),
+            "open_position_notional": round(sum(position.size_usd for position in open_positions), 4),
+        }
+
+    @app.get("/api/portfolio/closed-positions")
+    def closed_positions(limit: int = Query(100, ge=1, le=500), service: AgentService = Depends(service_factory)) -> dict:
+        positions = service.portfolio.list_closed_positions(limit=limit)
+        cumulative = 0.0
+        items = []
+        for position in reversed(positions):
+            cumulative += position.realized_pnl
+            items.append(
+                {
+                    "market_id": position.market_id,
+                    "side": position.side.value,
+                    "size_usd": position.size_usd,
+                    "entry_price": position.entry_price,
+                    "exit_price": position.exit_price,
+                    "opened_at": position.opened_at.isoformat(),
+                    "closed_at": position.closed_at.isoformat() if position.closed_at else None,
+                    "close_reason": position.close_reason,
+                    "realized_pnl": position.realized_pnl,
+                    "cumulative_pnl": round(cumulative, 6),
+                }
+            )
+        return {"count": len(items), "positions": items}
 
     @app.get("/api/simulate")
     def simulate(
