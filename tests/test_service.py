@@ -701,3 +701,47 @@ def test_agent_service_refresh_live_order_tracking(settings) -> None:
     assert payload["count"] == 1
     assert updates == [("live-1", "MATCHED")]
     assert payload["summary"] == {"active": 0, "terminal": 1, "errors": 0}
+
+
+def test_agent_service_live_reconcile(settings) -> None:
+    service = AgentService(settings)
+    service.polymarket.probe_live_readiness = lambda: type(
+        "Auth",
+        (),
+        {
+            "private_key_configured": True,
+            "funder_configured": True,
+            "signature_type": 2,
+            "live_client_constructible": True,
+            "missing": [],
+            "wallet_address": "0xdef",
+            "api_credentials_derived": True,
+            "server_ok": True,
+            "readonly_ready": True,
+            "probe_attempted": True,
+            "collateral_address": "0x2791",
+            "balance": 44.93,
+            "allowance": None,
+            "open_orders_count": 0,
+            "open_orders_markets": [],
+            "diagnostics_collected": True,
+            "errors": [],
+        },
+    )()
+    service.live_preflight = lambda market_id=None: {"market_id": market_id or "123", "ready": False, "blockers": ["edge_limit"]}
+    service.refresh_live_order_tracking = lambda limit=50: {
+        "readonly": True,
+        "count": 1,
+        "orders": [{"order_id": "live-1", "status": "MATCHED", "terminal": True}],
+        "summary": {"active": 0, "terminal": 1, "errors": 0},
+    }
+    service.live_trades = lambda market_id=None, limit=20: {
+        "readonly": True,
+        "count": 1,
+        "trades": [{"trade_id": "trade-1"}],
+    }
+    payload = service.live_reconcile("123", trade_limit=5, order_limit=7)
+    assert payload["market_id"] == "123"
+    assert payload["tracked_orders"]["summary"] == {"active": 0, "terminal": 1, "errors": 0}
+    assert payload["recent_trades"]["count"] == 1
+    assert payload["preflight"]["blockers"] == ["edge_limit"]

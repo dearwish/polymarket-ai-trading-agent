@@ -293,6 +293,29 @@ def refresh_live_orders(limit: int = typer.Option(50, min=1, max=500)) -> None:
         _handle_operator_error(exc)
 
 
+@app.command("live-reconcile")
+def live_reconcile(
+    market_id: str = typer.Option("", "--market-id"),
+    active: bool = typer.Option(False, "--active"),
+    trade_limit: int = typer.Option(20, "--trade-limit", min=1, max=200),
+    order_limit: int = typer.Option(50, "--order-limit", min=1, max=500),
+) -> None:
+    try:
+        service = _service()
+        resolved_market_id = _resolve_market_id(service, market_id, active) if (market_id or active) else ""
+        console.print_json(
+            json.dumps(
+                service.live_reconcile(
+                    resolved_market_id or None,
+                    trade_limit=trade_limit,
+                    order_limit=order_limit,
+                )
+            )
+        )
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
 @app.command()
 def live(
     market_id: str = typer.Argument("", help="Explicit market id to trade live."),

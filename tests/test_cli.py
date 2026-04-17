@@ -165,6 +165,14 @@ class StubService:
             "orders": [{"order_id": "live-1", "status": "MATCHED"}],
         }
 
+    def live_reconcile(self, market_id=None, trade_limit=20, order_limit=50):
+        return {
+            "readonly": True,
+            "market_id": market_id or "active-123",
+            "tracked_orders": {"summary": {"active": 0, "terminal": 1, "errors": 0}},
+            "recent_trades": {"count": 1, "trades": [{"trade_id": "trade-1"}]},
+        }
+
     def safety_stop_reason(self):
         return None
 
@@ -339,6 +347,15 @@ def test_cli_refresh_live_orders(monkeypatch) -> None:
     result = runner.invoke(app, ["refresh-live-orders"])
     assert result.exit_code == 0
     assert "\"status\": \"MATCHED\"" in result.stdout
+
+
+def test_cli_live_reconcile(monkeypatch) -> None:
+    monkeypatch.setattr("polymarket_ai_agent.apps.operator.cli._service", lambda: StubService())
+    result = runner.invoke(app, ["live-reconcile", "--active"])
+    assert result.exit_code == 0
+    assert "\"market_id\": \"active-123\"" in result.stdout
+    assert "\"tracked_orders\"" in result.stdout
+    assert "\"recent_trades\"" in result.stdout
 
 
 def test_cli_live_requires_confirm(monkeypatch) -> None:

@@ -534,6 +534,24 @@ class AgentService:
         self.journal.log_event("live_activity", payload)
         return payload
 
+    def live_reconcile(self, market_id: str | None = None, trade_limit: int = 20, order_limit: int = 50) -> dict:
+        auth = self._auth_status_dict(self.polymarket.probe_live_readiness())
+        if not auth["readonly_ready"]:
+            raise RuntimeError("Authenticated live reconciliation requires readonly_ready auth.")
+        preflight = self.live_preflight(market_id)
+        tracked = self.refresh_live_order_tracking(limit=order_limit)
+        trades = self.live_trades(market_id=preflight["market_id"], limit=trade_limit)
+        payload = {
+            "readonly": True,
+            "market_id": preflight["market_id"],
+            "auth": auth,
+            "preflight": preflight,
+            "tracked_orders": tracked,
+            "recent_trades": trades,
+        }
+        self.journal.log_event("live_reconcile", payload)
+        return payload
+
     def safety_stop_reason(self, account_state: AccountState | None = None) -> str | None:
         state = account_state or self.portfolio.get_account_state(ExecutionMode(self.settings.trading_mode))
         if state.daily_realized_pnl <= -self.settings.max_daily_loss_usd:
