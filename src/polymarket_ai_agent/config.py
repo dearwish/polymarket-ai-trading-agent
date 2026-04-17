@@ -27,7 +27,15 @@ class Settings(BaseSettings):
     polymarket_gamma_url: str = "https://gamma-api.polymarket.com"
     polymarket_data_url: str = "https://data-api.polymarket.com"
     polymarket_ws_market_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    polymarket_ws_user_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
     polymarket_chain_id: int = 137
+    btc_ws_url: str = "wss://stream.binance.com:9443/stream"
+    btc_symbol: str = "btcusdt"
+    btc_rest_fallback_url: str = "https://api.binance.com/api/v3/ticker/price"
+    ws_reconnect_backoff_seconds: float = 2.0
+    ws_reconnect_backoff_max_seconds: float = 30.0
+    daemon_discovery_interval_seconds: int = 60
+    daemon_decision_min_interval_seconds: float = 1.0
     polymarket_private_key: str = ""
     polymarket_funder: str = ""
     polymarket_signature_type: int = 0
