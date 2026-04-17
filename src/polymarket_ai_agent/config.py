@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     app_name: str = "polymarket-ai-agent"
     trading_mode: str = "paper"
-    market_family: str = "btc_5m"
+    market_family: str = "btc_1h"
     loop_seconds: int = 15
 
     openrouter_api_key: str = ""
@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     polymarket_host: str = "https://clob.polymarket.com"
     polymarket_gamma_url: str = "https://gamma-api.polymarket.com"
     polymarket_data_url: str = "https://data-api.polymarket.com"
+    polymarket_ws_market_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     polymarket_chain_id: int = 137
     polymarket_private_key: str = ""
     polymarket_funder: str = ""
@@ -60,7 +61,7 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
     "market_family": {
         "label": "Market Family",
         "type": "select",
-        "options": ["btc_5m", "btc_daily_threshold"],
+        "options": ["btc_1h", "btc_5m", "btc_daily_threshold"],
         "group": "runtime",
     },
     "loop_seconds": {"label": "Loop Seconds", "type": "number", "min": 1, "max": 300, "step": 1, "group": "runtime"},

@@ -149,6 +149,94 @@ def test_polymarket_connector_prefers_exact_btc_5m_match_score(settings) -> None
     assert markets[0].market_id == "exact"
 
 
+def test_polymarket_connector_discovers_btc_1h_market(settings) -> None:
+    configured = settings.model_copy(update={"market_family": "btc_1h"})
+    payload = [
+        {
+            "id": "1h",
+            "question": "Will Bitcoin be up or down in 1 hour?",
+            "conditionId": "cond-1h",
+            "slug": "btc-1h",
+            "endDate": "2099-01-01T00:00:00Z",
+            "clobTokenIds": '["yes-1h","no-1h"]',
+            "outcomePrices": "[0.57,0.43]",
+            "liquidityNum": 2000,
+            "volume24hr": 8000,
+            "description": "Resolution text",
+        },
+        {
+            "id": "daily",
+            "question": "Will the price of Bitcoin be above $82,000 on April 18?",
+            "conditionId": "cond-daily",
+            "slug": "bitcoin-above-82k-on-april-18",
+            "endDate": "2099-01-01T00:00:00Z",
+            "clobTokenIds": '["yes-daily","no-daily"]',
+            "outcomePrices": "[0.55,0.45]",
+            "liquidityNum": 3000,
+            "volume24hr": 9000,
+            "description": "Daily threshold market",
+        },
+    ]
+    connector = PolymarketConnector(configured, client=DummyClient([payload]))
+    markets = connector.discover_markets()
+    assert len(markets) == 1
+    assert markets[0].market_id == "1h"
+
+
+def test_polymarket_connector_prefers_nearest_active_btc_1h_market(settings) -> None:
+    configured = settings.model_copy(update={"market_family": "btc_1h"})
+    payload = [
+        {
+            "id": "nearer",
+            "question": "Will Bitcoin be up or down in 1 hour?",
+            "conditionId": "cond-nearer",
+            "slug": "btc-1h-nearer",
+            "endDate": (datetime.now(timezone.utc) + timedelta(minutes=50)).isoformat(),
+            "clobTokenIds": '["yes-nearer","no-nearer"]',
+            "outcomePrices": "[0.51,0.49]",
+            "liquidityNum": 1200,
+            "volume24hr": 2200,
+            "description": "Hourly direction market",
+        },
+        {
+            "id": "later",
+            "question": "Will Bitcoin be up or down in 1 hour?",
+            "conditionId": "cond-later",
+            "slug": "btc-1h-later",
+            "endDate": (datetime.now(timezone.utc) + timedelta(minutes=95)).isoformat(),
+            "clobTokenIds": '["yes-later","no-later"]',
+            "outcomePrices": "[0.52,0.48]",
+            "liquidityNum": 5000,
+            "volume24hr": 9000,
+            "description": "Hourly direction market",
+        },
+    ]
+    connector = PolymarketConnector(configured, client=DummyClient([payload]))
+    market = connector.discover_active_market()
+    assert market is not None
+    assert market.market_id == "nearer"
+
+
+def test_polymarket_connector_ignores_far_expiry_btc_1h_markets(settings) -> None:
+    configured = settings.model_copy(update={"market_family": "btc_1h"})
+    payload = [
+        {
+            "id": "too-far",
+            "question": "Will Bitcoin be up or down in 1 hour?",
+            "conditionId": "cond-too-far",
+            "slug": "btc-1h-too-far",
+            "endDate": (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat(),
+            "clobTokenIds": '["yes-too-far","no-too-far"]',
+            "outcomePrices": "[0.51,0.49]",
+            "liquidityNum": 1000,
+            "volume24hr": 2000,
+            "description": "Hourly direction market",
+        }
+    ]
+    connector = PolymarketConnector(configured, client=DummyClient([payload]))
+    assert connector.discover_active_market() is None
+
+
 def test_polymarket_connector_builds_orderbook_snapshot(settings) -> None:
     client = DummyClient(
         [
