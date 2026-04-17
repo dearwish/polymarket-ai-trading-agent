@@ -464,6 +464,30 @@ class AgentService:
             "trade": trade,
         }
 
+    def live_activity(self, market_id: str | None = None, trade_limit: int = 20) -> dict:
+        auth = self._auth_status_dict(self.polymarket.probe_live_readiness())
+        if not auth["readonly_ready"]:
+            raise RuntimeError("Authenticated live activity inspection requires readonly_ready auth.")
+        preflight = self.live_preflight(market_id)
+        orders = self.polymarket.list_live_orders()
+        trades = self.polymarket.list_live_trades(market_id=preflight["market_id"], limit=trade_limit)
+        payload = {
+            "readonly": True,
+            "market_id": preflight["market_id"],
+            "auth": auth,
+            "preflight": preflight,
+            "open_orders": {
+                "count": len(orders),
+                "orders": orders,
+            },
+            "recent_trades": {
+                "count": len(trades),
+                "trades": trades,
+            },
+        }
+        self.journal.log_event("live_activity", payload)
+        return payload
+
     def safety_stop_reason(self, account_state: AccountState | None = None) -> str | None:
         state = account_state or self.portfolio.get_account_state(ExecutionMode(self.settings.trading_mode))
         if state.daily_realized_pnl <= -self.settings.max_daily_loss_usd:
