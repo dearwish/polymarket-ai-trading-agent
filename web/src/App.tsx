@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events";
 
@@ -669,6 +669,7 @@ function EventsPage({ events, report }: { events: RecentEvent[]; report: ReportP
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewKey>(getInitialView);
+  const [streamStatus, setStreamStatus] = useState<"connecting" | "connected" | "reconnecting" | "disconnected">("connecting");
   const [state, setState] = useState<DashboardState>({
     status: null,
     auth: null,
@@ -684,6 +685,7 @@ export default function App() {
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const reconnectTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const onHashChange = () => setActiveView(getInitialView());
@@ -692,24 +694,25 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-      setError("");
-      try {
-        const snapshot = await fetchJson<DashboardSnapshotPayload>("/api/dashboard");
-        setState(mapSnapshotToState(snapshot));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown dashboard error");
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    load();
+    void refreshDashboard();
   }, []);
 
+  async function refreshDashboard() {
+    setLoading(true);
+    setError("");
+    try {
+      const snapshot = await fetchJson<DashboardSnapshotPayload>("/api/dashboard");
+      setState(mapSnapshotToState(snapshot));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown dashboard error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    const source = new EventSource("/api/dashboard/stream?interval_seconds=5");
+    let source: EventSource | null = null;
+    let disposed = false;
     const eventNames = [
       "status",
       "auth",
@@ -723,23 +726,48 @@ export default function App() {
       "live_orders",
       "live_trades",
     ];
-    const handlers = eventNames.map((eventName) => {
-      const handler = (event: Event) => {
-        const payload = JSON.parse((event as MessageEvent).data);
-        setState((current) => applyDashboardDelta(current, eventName, payload));
-        setLoading(false);
+
+    const connect = () => {
+      if (disposed) return;
+      setStreamStatus((current) => (current === "connected" ? current : "connecting"));
+      source = new EventSource("/api/dashboard/stream?interval_seconds=5");
+      source.onopen = () => {
+        setStreamStatus("connected");
         setError("");
       };
-      source.addEventListener(eventName, handler);
-      return { eventName, handler };
-    });
-    source.onerror = () => {
-      setError("Dashboard stream disconnected.");
-      source.close();
+      const handlers = eventNames.map((eventName) => {
+        const handler = (event: Event) => {
+          const payload = JSON.parse((event as MessageEvent).data);
+          setState((current) => applyDashboardDelta(current, eventName, payload));
+          setLoading(false);
+          setError("");
+        };
+        source?.addEventListener(eventName, handler);
+        return { eventName, handler };
+      });
+      source.onerror = () => {
+        handlers.forEach(({ eventName, handler }) => source?.removeEventListener(eventName, handler));
+        source?.close();
+        source = null;
+        if (disposed) return;
+        setStreamStatus("reconnecting");
+        if (reconnectTimerRef.current) {
+          window.clearTimeout(reconnectTimerRef.current);
+        }
+        reconnectTimerRef.current = window.setTimeout(() => {
+          connect();
+        }, 3000);
+      };
     };
+
+    connect();
     return () => {
-      handlers.forEach(({ eventName, handler }) => source.removeEventListener(eventName, handler));
-      source.close();
+      disposed = true;
+      setStreamStatus("disconnected");
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
+      source?.close();
     };
   }, []);
 
@@ -768,12 +796,18 @@ export default function App() {
           <p className="subtitle">Live monitoring for signals, trades, orders, and portfolio state.</p>
         </div>
         <div className="hero-meta">
+          <span className={`pill stream-${streamStatus}`}>
+            Stream: {streamStatus}
+          </span>
           <span className={`pill ${state.auth?.readonly_ready ? "ready" : "blocked"}`}>
             {state.auth?.readonly_ready ? "Readonly Ready" : "Auth Blocked"}
           </span>
           <span className={`pill ${state.status?.live_trading_enabled ? "ready" : "blocked"}`}>
             {state.status?.live_trading_enabled ? "Live Enabled" : "Live Disabled"}
           </span>
+          <button type="button" className="refresh-button" onClick={() => void refreshDashboard()}>
+            Refresh
+          </button>
         </div>
       </header>
 
