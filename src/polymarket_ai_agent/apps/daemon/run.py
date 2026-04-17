@@ -12,8 +12,10 @@ from polymarket_ai_agent.connectors.binance_ws import BinanceBtcFeed, BtcTick
 from polymarket_ai_agent.connectors.polymarket_ws import MarketStreamEvent, PolymarketMarketStream
 from polymarket_ai_agent.engine.btc_state import BtcSnapshot, BtcState
 from polymarket_ai_agent.engine.market_state import MarketFeatures, MarketState
+from polymarket_ai_agent.engine.quant_scoring import QuantScoringEngine
+from polymarket_ai_agent.engine.research import ResearchEngine
 from polymarket_ai_agent.service import AgentService
-from polymarket_ai_agent.types import MarketCandidate
+from polymarket_ai_agent.types import MarketAssessment, MarketCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +65,17 @@ class BtcFeedFactory(Protocol):
     def __call__(self) -> BinanceBtcFeed: ...
 
 
-DecisionCallback = Callable[[MarketFeatures, BtcSnapshot | None, DaemonMetrics], Awaitable[None]]
+@dataclass(slots=True)
+class DecisionContext:
+    market_id: str
+    candidate: MarketCandidate
+    features: MarketFeatures
+    btc_snapshot: BtcSnapshot | None
+    assessment: MarketAssessment
+    metrics: "DaemonMetrics"
+
+
+DecisionCallback = Callable[[DecisionContext], Awaitable[None]]
 
 
 class DaemonRunner:
@@ -111,7 +123,10 @@ class DaemonRunner:
         self._decision_callback = decision_callback or self._default_decision_callback
         self.metrics = DaemonMetrics()
         self.btc_state = BtcState()
+        self.research = ResearchEngine()
+        self.quant = QuantScoringEngine(settings)
         self._market_states: dict[str, MarketState] = {}
+        self._candidates: dict[str, MarketCandidate] = {}
         self._asset_to_market: dict[str, str] = {}
         self._active_asset_ids: set[str] = set()
         self._market_subscriber_task: asyncio.Task[None] | None = None
@@ -177,6 +192,7 @@ class DaemonRunner:
 
     async def _apply_candidates(self, candidates: Iterable[MarketCandidate]) -> None:
         new_states: dict[str, MarketState] = {}
+        new_candidates: dict[str, MarketCandidate] = {}
         asset_to_market: dict[str, str] = {}
         asset_ids: set[str] = set()
         for candidate in candidates:
@@ -186,6 +202,7 @@ class DaemonRunner:
                 no_token_id=candidate.no_token_id,
             )
             new_states[candidate.market_id] = state
+            new_candidates[candidate.market_id] = candidate
             if candidate.yes_token_id:
                 asset_to_market[candidate.yes_token_id] = candidate.market_id
                 asset_ids.add(candidate.yes_token_id)
@@ -193,6 +210,7 @@ class DaemonRunner:
                 asset_to_market[candidate.no_token_id] = candidate.market_id
                 asset_ids.add(candidate.no_token_id)
         self._market_states = new_states
+        self._candidates = new_candidates
         self._asset_to_market = asset_to_market
         self.metrics.active_market_count = len(new_states)
         if asset_ids == self._active_asset_ids:
@@ -271,27 +289,57 @@ class DaemonRunner:
             elapsed = (now - self._last_decision_at).total_seconds()
             if elapsed < self.config.decision_min_interval_seconds:
                 return
+        candidate = self._candidates.get(state.market_id)
+        if candidate is None:
+            return
         self._last_decision_at = now
         self.metrics.decision_ticks += 1
         self.metrics.last_decision_at = now
         started = _utc_now()
         features = state.features(now=now)
         btc_snapshot = self.btc_state.snapshot(now=now)
+        tte_seconds = self._seconds_to_expiry(candidate.end_date_iso, now=now)
+        packet = self.research.build_from_features(
+            candidate=candidate,
+            features=features,
+            btc_snapshot=btc_snapshot,
+            seconds_to_expiry=tte_seconds,
+        )
+        assessment = self.quant.score_market(packet)
+        context = DecisionContext(
+            market_id=state.market_id,
+            candidate=candidate,
+            features=features,
+            btc_snapshot=btc_snapshot,
+            assessment=assessment,
+            metrics=self.metrics,
+        )
         try:
-            await self._decision_callback(features, btc_snapshot, self.metrics)
+            await self._decision_callback(context)
         except Exception as exc:
             logger.warning("daemon decision callback failed: %s", exc)
         elapsed = (_utc_now() - started).total_seconds() * 1000.0
         self.metrics.last_decision_latency_ms = round(elapsed, 3)
 
-    async def _default_decision_callback(
-        self,
-        features: MarketFeatures,
-        btc_snapshot: BtcSnapshot | None,
-        metrics: DaemonMetrics,
-    ) -> None:
+    @staticmethod
+    def _seconds_to_expiry(end_date_iso: str, now: datetime | None = None) -> int:
+        if not end_date_iso:
+            return 0
+        try:
+            expiry = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+        reference = now or _utc_now()
+        return max(0, int((expiry - reference).total_seconds()))
+
+    async def _default_decision_callback(self, context: DecisionContext) -> None:
+        features = context.features
+        btc = context.btc_snapshot
+        assessment = context.assessment
         payload: dict[str, Any] = {
             "market_id": features.market_id,
+            "question": context.candidate.question,
+            "seconds_to_expiry": context.assessment and self._seconds_to_expiry(context.candidate.end_date_iso),
             "bid_yes": features.bid_yes,
             "ask_yes": features.ask_yes,
             "mid_yes": features.mid_yes,
@@ -302,11 +350,19 @@ class DaemonRunner:
             "signed_flow_5s": features.signed_flow_5s,
             "trade_count_5s": features.trade_count_5s,
             "last_update_age_seconds": features.last_update_age_seconds,
-            "btc_price": btc_snapshot.price if btc_snapshot else None,
-            "btc_realized_vol_30m": btc_snapshot.realized_vol_30m if btc_snapshot else None,
-            "btc_log_return_5m": btc_snapshot.log_return_5m if btc_snapshot else None,
-            "polymarket_events": metrics.polymarket_events,
-            "btc_ticks": metrics.btc_ticks,
+            "btc_price": btc.price if btc else None,
+            "btc_realized_vol_30m": btc.realized_vol_30m if btc else None,
+            "btc_log_return_5m": btc.log_return_5m if btc else None,
+            "polymarket_events": context.metrics.polymarket_events,
+            "btc_ticks": context.metrics.btc_ticks,
+            "fair_probability": assessment.fair_probability,
+            "fair_probability_no": assessment.fair_probability_no,
+            "edge_yes": assessment.edge_yes,
+            "edge_no": assessment.edge_no,
+            "suggested_side": assessment.suggested_side.value,
+            "confidence": assessment.confidence,
+            "slippage_bps": assessment.slippage_bps,
+            "expiry_risk": assessment.expiry_risk,
         }
         await asyncio.to_thread(self.service.journal.log_event, "daemon_tick", payload)
 

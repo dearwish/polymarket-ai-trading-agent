@@ -168,8 +168,14 @@ def test_daemon_processes_ws_events_and_updates_state(tmp_path: Path) -> None:
     assert snapshot.bid_yes == 0.49
     assert snapshot.ask_yes == 0.52
     assert runner.btc_state.last_price == 70100.0
-    tick_events = [evt for evt, _ in journal.events if evt == "daemon_tick"]
-    assert tick_events, "daemon_tick journal events expected"
+    tick_payloads = [payload for evt, payload in journal.events if evt == "daemon_tick"]
+    assert tick_payloads, "daemon_tick journal events expected"
+    latest = tick_payloads[-1]
+    # Phase 2: daemon now runs the quant scorer on every decision tick.
+    assert "fair_probability" in latest
+    assert "edge_yes" in latest
+    assert "edge_no" in latest
+    assert latest["suggested_side"] in {"YES", "NO", "ABSTAIN"}
     assert market_stream.run_calls, "market stream run() should be invoked"
     assert btc_feed.rest_calls == 1, "BTC seed REST call expected"
 
