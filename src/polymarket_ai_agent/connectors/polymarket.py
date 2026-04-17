@@ -320,7 +320,7 @@ class PolymarketConnector:
                 str(item.get("question") or ""),
                 str(item.get("description") or ""),
                 str(item.get("slug") or ""),
-            ) >= 4
+            ) >= 5
         if self.settings.market_family == "btc_5m":
             return self._market_family_score(
                 str(item.get("question") or ""),
@@ -354,7 +354,9 @@ class PolymarketConnector:
         return None
 
     def _discovery_request_limit(self, requested_limit: int) -> int:
-        if self.settings.market_family in {"btc_1h", "btc_5m", "btc_daily_threshold"}:
+        if self.settings.market_family == "btc_1h":
+            return max(requested_limit, 800)
+        if self.settings.market_family in {"btc_5m", "btc_daily_threshold"}:
             return max(requested_limit, 200)
         return requested_limit
 
@@ -526,6 +528,12 @@ class PolymarketConnector:
                 "go up or down",
             )
         )
+        has_hourly_family_pattern = (
+            "bitcoin up or down -" in joined
+            or "bitcoin up or down" in joined
+            or "btc-up-or-down" in joined
+            or "bitcoin-up-or-down" in joined
+        )
         if not has_btc:
             return 0
         score = 0
@@ -535,6 +543,8 @@ class PolymarketConnector:
             score += 2
         if has_direction:
             score += 2
+        if has_hourly_family_pattern:
+            score += 1
         return score
 
     @staticmethod

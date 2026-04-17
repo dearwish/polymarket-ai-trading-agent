@@ -154,15 +154,15 @@ def test_polymarket_connector_discovers_btc_1h_market(settings) -> None:
     payload = [
         {
             "id": "1h",
-            "question": "Will Bitcoin be up or down in 1 hour?",
+            "question": "Bitcoin Up or Down - April 17, 3PM ET",
             "conditionId": "cond-1h",
-            "slug": "btc-1h",
+            "slug": "bitcoin-up-or-down-april-17-2026-3pm-et",
             "endDate": "2099-01-01T00:00:00Z",
             "clobTokenIds": '["yes-1h","no-1h"]',
             "outcomePrices": "[0.57,0.43]",
             "liquidityNum": 2000,
             "volume24hr": 8000,
-            "description": "Resolution text",
+            "description": "This hourly BTC market resolves to Up or Down on Binance BTC/USDT.",
         },
         {
             "id": "daily",
@@ -188,27 +188,27 @@ def test_polymarket_connector_prefers_nearest_active_btc_1h_market(settings) -> 
     payload = [
         {
             "id": "nearer",
-            "question": "Will Bitcoin be up or down in 1 hour?",
+            "question": "Bitcoin Up or Down - April 17, 3PM ET",
             "conditionId": "cond-nearer",
-            "slug": "btc-1h-nearer",
+            "slug": "bitcoin-up-or-down-april-17-2026-3pm-et",
             "endDate": (datetime.now(timezone.utc) + timedelta(minutes=50)).isoformat(),
             "clobTokenIds": '["yes-nearer","no-nearer"]',
             "outcomePrices": "[0.51,0.49]",
             "liquidityNum": 1200,
             "volume24hr": 2200,
-            "description": "Hourly direction market",
+            "description": "Hourly BTC direction market on Binance.",
         },
         {
             "id": "later",
-            "question": "Will Bitcoin be up or down in 1 hour?",
+            "question": "Bitcoin Up or Down - April 17, 4PM ET",
             "conditionId": "cond-later",
-            "slug": "btc-1h-later",
+            "slug": "bitcoin-up-or-down-april-17-2026-4pm-et",
             "endDate": (datetime.now(timezone.utc) + timedelta(minutes=95)).isoformat(),
             "clobTokenIds": '["yes-later","no-later"]',
             "outcomePrices": "[0.52,0.48]",
             "liquidityNum": 5000,
             "volume24hr": 9000,
-            "description": "Hourly direction market",
+            "description": "Hourly BTC direction market on Binance.",
         },
     ]
     connector = PolymarketConnector(configured, client=DummyClient([payload]))
@@ -222,19 +222,40 @@ def test_polymarket_connector_ignores_far_expiry_btc_1h_markets(settings) -> Non
     payload = [
         {
             "id": "too-far",
-            "question": "Will Bitcoin be up or down in 1 hour?",
+            "question": "Bitcoin Up or Down - April 17, 8PM ET",
             "conditionId": "cond-too-far",
-            "slug": "btc-1h-too-far",
+            "slug": "bitcoin-up-or-down-april-17-2026-8pm-et",
             "endDate": (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat(),
             "clobTokenIds": '["yes-too-far","no-too-far"]',
             "outcomePrices": "[0.51,0.49]",
             "liquidityNum": 1000,
             "volume24hr": 2000,
-            "description": "Hourly direction market",
+            "description": "Hourly BTC direction market on Binance.",
         }
     ]
     connector = PolymarketConnector(configured, client=DummyClient([payload]))
     assert connector.discover_active_market() is None
+
+
+def test_polymarket_connector_rejects_generic_hourly_non_bitcoin_market(settings) -> None:
+    configured = settings.model_copy(update={"market_family": "btc_1h"})
+    payload = [
+        {
+            "id": "spy-hourly",
+            "question": "SPY (SPY) Up or Down on April 17?",
+            "conditionId": "cond-spy",
+            "slug": "spy-up-or-down-on-april-17-2026",
+            "endDate": (datetime.now(timezone.utc) + timedelta(minutes=50)).isoformat(),
+            "clobTokenIds": '["yes-spy","no-spy"]',
+            "outcomePrices": "[0.51,0.49]",
+            "liquidityNum": 2000,
+            "volume24hr": 6000,
+            "description": "This market resolves using the 1-minute candle for SPY during regular trading hours.",
+        }
+    ]
+    connector = PolymarketConnector(configured, client=DummyClient([payload]))
+    markets = connector.discover_markets()
+    assert markets == []
 
 
 def test_polymarket_connector_builds_orderbook_snapshot(settings) -> None:
