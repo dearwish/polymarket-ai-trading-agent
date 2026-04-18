@@ -224,6 +224,7 @@ type DaemonHeartbeatPayload = {
 type DaemonTickPayload = {
   market_id: string;
   question: string;
+  slug?: string;
   end_date_iso?: string;
   seconds_to_expiry: number;
   bid_yes: number;
@@ -685,8 +686,11 @@ function EventEntry({
   );
 }
 
-function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradingMode }: { liveOrders: LiveOrder[]; liveTrades: LiveTrade[]; liveActivity: LiveActivityPayload | null; paperActivity: PaperActivityEvent[]; tradingMode: string }) {
+function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradingMode, daemonTicks }: { liveOrders: LiveOrder[]; liveTrades: LiveTrade[]; liveActivity: LiveActivityPayload | null; paperActivity: PaperActivityEvent[]; tradingMode: string; daemonTicks: DaemonTickPayload[] }) {
   const isLive = tradingMode === "live";
+  const [timezone] = useLocalStorage<string>("display.timezone", BROWSER_TZ);
+  const [timeFormat] = useLocalStorage<TimeFormat>("display.timeFormat", "24h");
+  const marketLookup = useMemo(() => buildMarketLookup(daemonTicks), [daemonTicks]);
   const [selectedOrderId, setSelectedOrderId] = useState<string>("");
   const [selectedTradeId, setSelectedTradeId] = useState<string>("");
   const [liveOpen, setLiveOpen] = useState<boolean>(isLive);
@@ -852,7 +856,7 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradi
                   return (
                     <tr key={`${event.logged_at}-${index}`}>
                       <td style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: "12px" }}>{event.logged_at.slice(11, 19)}</td>
-                      <td>{p.market_id ?? "n/a"}</td>
+                      <td>{p.market_id ? <MarketCell marketId={p.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /> : "n/a"}</td>
                       <td className={sideClass}>{side || "n/a"}</td>
                       <td className={statusClass}>{status || "n/a"}</td>
                       <td>{price}</td>
@@ -875,7 +879,10 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradi
   );
 }
 
-function PortfolioPage({ summary, positions, openPositions, equityCurve }: { summary: PortfolioSummaryPayload | null; positions: ClosedPosition[]; openPositions: OpenPosition[]; equityCurve: EquityCurvePayload | null }) {
+function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonTicks }: { summary: PortfolioSummaryPayload | null; positions: ClosedPosition[]; openPositions: OpenPosition[]; equityCurve: EquityCurvePayload | null; daemonTicks: DaemonTickPayload[] }) {
+  const [timezone] = useLocalStorage<string>("display.timezone", BROWSER_TZ);
+  const [timeFormat] = useLocalStorage<TimeFormat>("display.timeFormat", "24h");
+  const marketLookup = useMemo(() => buildMarketLookup(daemonTicks), [daemonTicks]);
   return (
     <section className="grid detail-grid">
       <article className="panel">
@@ -926,7 +933,7 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve }: { sum
               <tbody>
                 {openPositions.map((position) => (
                   <tr key={position.order_id || `${position.market_id}-${position.opened_at}`}>
-                    <td>{position.market_id}</td>
+                    <td><MarketCell marketId={position.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
                     <td className={position.side === "YES" ? "positive" : position.side === "NO" ? "negative" : ""}>{position.side}</td>
                     <td>{formatMoney(position.size_usd)}</td>
                     <td>{position.entry_price.toFixed(4)}</td>
@@ -960,7 +967,7 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve }: { sum
             <tbody>
               {positions.map((position) => (
                 <tr key={`${position.market_id}-${position.closed_at}`}>
-                  <td>{position.market_id}</td>
+                  <td><MarketCell marketId={position.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
                   <td>{position.side}</td>
                   <td>{formatMoney(position.size_usd)}</td>
                   <td className={position.realized_pnl >= 0 ? "positive" : "negative"}>{formatMoney(position.realized_pnl)}</td>
@@ -1266,6 +1273,57 @@ function heartbeatAgeClass(age: number | null): string {
 }
 
 type InfoBarItem = { label: string; value: string | number; tone?: "muted" | "positive" | "negative" | "ready" | "blocked" };
+
+type MarketLookupEntry = { question?: string; slug?: string; end_date_iso?: string };
+type MarketLookup = Record<string, MarketLookupEntry>;
+
+function buildMarketLookup(ticks: DaemonTickPayload[]): MarketLookup {
+  const lookup: MarketLookup = {};
+  for (const tick of ticks) {
+    if (!tick.market_id) continue;
+    lookup[tick.market_id] = {
+      question: tick.question,
+      slug: tick.slug,
+      end_date_iso: tick.end_date_iso,
+    };
+  }
+  return lookup;
+}
+
+function MarketCell({
+  marketId,
+  lookup,
+  timezone,
+  timeFormat,
+}: {
+  marketId: string;
+  lookup: MarketLookup;
+  timezone: string;
+  timeFormat: TimeFormat;
+}) {
+  const info = lookup[marketId];
+  const slug = info?.slug;
+  const href = slug ? `https://polymarket.com/event/${slug}` : undefined;
+  const tooltipParts: string[] = [];
+  if (info?.question) tooltipParts.push(info.question);
+  if (info?.end_date_iso) tooltipParts.push(`Ends: ${formatEndTime(info.end_date_iso, timezone, timeFormat)}`);
+  tooltipParts.push(`ID: ${marketId}`);
+  const tooltip = tooltipParts.join("\n");
+  if (!href) {
+    return <span title={tooltip}>{marketId}</span>;
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      title={tooltip}
+      className="market-link"
+    >
+      {marketId}
+    </a>
+  );
+}
 
 function InfoBar({ heartbeat, items }: { heartbeat: DaemonHeartbeatPayload | null; items: InfoBarItem[] }) {
   const hb = heartbeat?.heartbeat ?? null;
@@ -1599,9 +1657,9 @@ export default function App() {
       case "decisions":
         return <DecisionsPage decisions={state.recentDecisions} />;
       case "orders":
-        return <OrdersPage liveOrders={state.liveOrders} liveTrades={state.liveTrades} liveActivity={state.liveActivity} paperActivity={state.paperActivity} tradingMode={state.status?.trading_mode ?? "paper"} />;
+        return <OrdersPage liveOrders={state.liveOrders} liveTrades={state.liveTrades} liveActivity={state.liveActivity} paperActivity={state.paperActivity} tradingMode={state.status?.trading_mode ?? "paper"} daemonTicks={state.daemonTicks} />;
       case "portfolio":
-        return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} openPositions={state.openPositions?.positions ?? []} equityCurve={state.equityCurve} />;
+        return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} openPositions={state.openPositions?.positions ?? []} equityCurve={state.equityCurve} daemonTicks={state.daemonTicks} />;
       case "events":
         return <EventsPage events={state.recentEvents} report={state.report} />;
       case "settings":

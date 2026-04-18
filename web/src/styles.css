@@ -653,6 +653,18 @@ th {
   margin-right: 6px;
 }
 
+.market-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(77, 212, 172, 0.4);
+  cursor: pointer;
+}
+
+.market-link:hover {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 .accordion-stack {
   display: grid;
   gap: 14px;
