@@ -92,7 +92,7 @@ def test_agent_service_paper_trade(settings, market_snapshot, market_assessment)
         rationale=["approved"],
         rejected_by=[],
     )
-    service.execution.execute_trade = lambda decision, orderbook: ExecutionResult(
+    service.execution.execute_trade = lambda decision, orderbook, **_: ExecutionResult(
         market_id="123",
         success=True,
         mode=ExecutionMode.PAPER,
@@ -485,7 +485,7 @@ def test_agent_service_live_trade_executes_when_preflight_ready(settings, market
             rejected_orders=0,
         ),
     )
-    service.execution.execute_trade = lambda decision, orderbook: ExecutionResult(
+    service.execution.execute_trade = lambda decision, orderbook, **_: ExecutionResult(
         market_id="123",
         success=True,
         mode=ExecutionMode.LIVE,

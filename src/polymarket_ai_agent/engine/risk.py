@@ -4,8 +4,11 @@ from polymarket_ai_agent.config import Settings
 from polymarket_ai_agent.types import (
     AccountState,
     DecisionStatus,
+    ExecutionStyle,
     MarketAssessment,
     MarketSnapshot,
+    OrderSide,
+    PositionRecord,
     RiskState,
     SuggestedSide,
     TradeDecision,
@@ -55,6 +58,40 @@ class RiskEngine:
             rationale=assessment.reasons_for_trade,
             rejected_by=[],
             asset_id=snapshot.candidate.yes_token_id if side == SuggestedSide.YES else snapshot.candidate.no_token_id,
+            order_side=OrderSide.BUY,
+            intent="OPEN",
+            execution_style=ExecutionStyle.FOK_TAKER,
+        )
+
+    def build_close_decision(
+        self,
+        position: PositionRecord,
+        snapshot: MarketSnapshot,
+    ) -> TradeDecision:
+        """Construct a SELL-side TradeDecision that closes an open position.
+
+        The close price targets the best opposite-of-entry level so FOK
+        crossing gets a fast exit; size mirrors the opened position's notional.
+        """
+        orderbook = snapshot.orderbook
+        if position.side == SuggestedSide.YES:
+            limit_price = max(orderbook.bid, 0.01) if orderbook.bid > 0 else max(orderbook.midpoint, 0.01)
+            asset_id = snapshot.candidate.yes_token_id
+        else:
+            limit_price = max(orderbook.ask, 0.01) if orderbook.ask > 0 else max(orderbook.midpoint, 0.01)
+            asset_id = snapshot.candidate.no_token_id
+        return TradeDecision(
+            market_id=snapshot.candidate.market_id,
+            status=DecisionStatus.APPROVED,
+            side=position.side,
+            size_usd=position.size_usd,
+            limit_price=limit_price,
+            rationale=[f"Close position opened at {position.entry_price:.4f}"],
+            rejected_by=[],
+            asset_id=asset_id,
+            order_side=OrderSide.SELL,
+            intent="CLOSE",
+            execution_style=ExecutionStyle.FOK_TAKER,
         )
 
     def evaluate(

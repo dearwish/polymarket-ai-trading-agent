@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from polymarket_ai_agent.config import Settings
 from polymarket_ai_agent.connectors.external_feeds import ExternalFeedConnector
 from polymarket_ai_agent.connectors.polymarket import PolymarketConnector
-from polymarket_ai_agent.engine.execution import ExecutionEngine
+from polymarket_ai_agent.engine.execution import ExecutionEngine, ExecutionRouter
 from polymarket_ai_agent.engine.journal import Journal
 from polymarket_ai_agent.engine.portfolio import PortfolioEngine
 from polymarket_ai_agent.engine.research import ResearchEngine
@@ -20,6 +20,7 @@ from polymarket_ai_agent.types import (
     MarketSnapshot,
     OrderBookSnapshot,
     PositionAction,
+    PositionRecord,
     Report,
     utc_now,
 )
@@ -38,6 +39,8 @@ class AgentService:
             paper_entry_slippage_bps=settings.paper_entry_slippage_bps,
             live_trading_enabled=settings.live_trading_enabled,
             live_executor=self.polymarket.execute_live_trade,
+            router=ExecutionRouter(settings),
+            settings=settings,
         )
         self.journal = Journal(settings.db_path, settings.events_path)
         self.portfolio = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
@@ -69,6 +72,8 @@ class AgentService:
                 depth_usd=orderbook.depth_usd,
                 last_trade_price=orderbook.last_trade_price,
                 two_sided=orderbook.two_sided,
+                bid_levels=list(orderbook.bid_levels),
+                ask_levels=list(orderbook.ask_levels),
             ),
             seconds_to_expiry=seconds_to_expiry,
             recent_price_change_bps=(orderbook.midpoint - candidate.implied_probability) * 10_000,
@@ -95,7 +100,12 @@ class AgentService:
     def paper_trade(self, market_id: str):
         snapshot, assessment, decision, _account_state = self._prepare_trade(market_id, ExecutionMode.PAPER)
         self.journal.log_event("trade_decision", decision)
-        result = self.execution.execute_trade(decision, snapshot.orderbook)
+        result = self.execution.execute_trade(
+            decision,
+            snapshot.orderbook,
+            seconds_to_expiry=snapshot.seconds_to_expiry,
+            edge=assessment.edge,
+        )
         self.portfolio.record_execution(decision, result)
         self.journal.log_event("execution_result", result)
         return snapshot, assessment, decision, result
@@ -178,7 +188,12 @@ class AgentService:
             raise RuntimeError(f"Live preflight failed: {', '.join(preflight['blockers'])}")
         snapshot, assessment, decision, _account_state = self._prepare_trade(market_id, ExecutionMode.LIVE)
         self.journal.log_event("trade_decision", decision)
-        result = self.execution.execute_trade(decision, snapshot.orderbook)
+        result = self.execution.execute_trade(
+            decision,
+            snapshot.orderbook,
+            seconds_to_expiry=snapshot.seconds_to_expiry,
+            edge=assessment.edge,
+        )
         self.portfolio.record_execution(decision, result)
         self.journal.log_event("execution_result", result)
         return snapshot, assessment, decision, result
@@ -287,6 +302,8 @@ class AgentService:
             self.journal.log_event("position_action", action)
             return action
         snapshot = self.build_market_snapshot(market_id)
+        if ExecutionMode(self.settings.trading_mode) == ExecutionMode.LIVE:
+            return self._close_live_position(existing, snapshot, reason)
         exit_price = self.portfolio.estimate_exit_price(
             existing,
             snapshot.orderbook,
@@ -297,6 +314,48 @@ class AgentService:
             exit_price=exit_price,
             reason=reason,
         )
+        self.journal.log_event("position_action", action)
+        return action
+
+    def _close_live_position(
+        self,
+        position: PositionRecord,
+        snapshot: MarketSnapshot,
+        reason: str,
+    ) -> PositionAction:
+        """Post a SELL-side counter order to exit a live position.
+
+        Preflight checks (auth, live enablement) run here rather than via
+        :py:meth:`live_preflight` because this is an exit action: we must close
+        even when opening-side risk gates would reject (e.g. daily loss limit
+        already hit).
+        """
+        auth = self.polymarket.probe_live_readiness()
+        if not auth.readonly_ready:
+            raise RuntimeError("Live close requires authenticated readonly-ready client.")
+        if not self.settings.live_trading_enabled:
+            raise RuntimeError("Live close requires LIVE_TRADING_ENABLED=true.")
+        close_decision = self.risk.build_close_decision(position, snapshot)
+        result = self.execution.execute_trade(
+            close_decision,
+            snapshot.orderbook,
+            seconds_to_expiry=snapshot.seconds_to_expiry,
+            edge=0.0,
+        )
+        self.journal.log_event("close_live_decision", close_decision)
+        self.journal.log_event("close_live_result", result)
+        if result.success and result.fill_price > 0.0:
+            action = self.portfolio.close_position(
+                position.market_id,
+                exit_price=result.fill_price,
+                reason=reason,
+            )
+        else:
+            action = PositionAction(
+                market_id=position.market_id,
+                action="LIVE_CLOSE_POSTED",
+                reason=f"{reason}: {result.status} {result.detail}".strip(),
+            )
         self.journal.log_event("position_action", action)
         return action
 
