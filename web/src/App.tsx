@@ -345,16 +345,26 @@ const BROWSER_TZ = (() => {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return "UTC"; }
 })();
 
-const TIMEZONE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: BROWSER_TZ, label: `Browser (${BROWSER_TZ})` },
-  { value: "UTC", label: "UTC" },
-  { value: "Asia/Jerusalem", label: "Israel (Asia/Jerusalem)" },
-  { value: "America/New_York", label: "New York (ET)" },
-  { value: "Europe/London", label: "London" },
-  { value: "Europe/Berlin", label: "Berlin" },
-  { value: "Asia/Tokyo", label: "Tokyo" },
-  { value: "Asia/Shanghai", label: "Shanghai" },
-];
+const TIMEZONE_OPTIONS: Array<{ value: string; label: string }> = (() => {
+  const curated: Array<{ value: string; label: string }> = [
+    { value: "UTC", label: "UTC" },
+    { value: "Asia/Jerusalem", label: "Israel (Asia/Jerusalem)" },
+    { value: "America/New_York", label: "New York (ET)" },
+    { value: "Europe/London", label: "London" },
+    { value: "Europe/Berlin", label: "Berlin" },
+    { value: "Asia/Tokyo", label: "Tokyo" },
+    { value: "Asia/Shanghai", label: "Shanghai" },
+  ];
+  // Only add a Browser entry if it isn't already in the curated list —
+  // otherwise we'd emit duplicate <option> keys and React warns.
+  const existing = curated.find((opt) => opt.value === BROWSER_TZ);
+  if (existing) {
+    return curated.map((opt) =>
+      opt.value === BROWSER_TZ ? { ...opt, label: `${opt.label} · Browser` } : opt,
+    );
+  }
+  return [{ value: BROWSER_TZ, label: `Browser (${BROWSER_TZ})` }, ...curated];
+})();
 
 function formatEndTime(endDateIso: string | null | undefined, tz: string, fmt: TimeFormat): string {
   if (!endDateIso) return "n/a";
