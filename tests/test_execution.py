@@ -47,7 +47,7 @@ def test_execution_engine_executes_paper_trade() -> None:
     assert result.fill_price > 0.52
 
 
-def test_execution_engine_blocks_live_trade_in_scaffold() -> None:
+def test_execution_engine_blocks_live_trade_when_disabled() -> None:
     engine = ExecutionEngine(ExecutionMode.LIVE)
     decision = TradeDecision(
         market_id="123",

@@ -1,14 +1,14 @@
 # Polymarket AI Agent
 
-Python project for a Polymarket trading agent with three clearly separated layers:
+Event-driven BTC trading agent for Polymarket's short-horizon markets (`btc_5m`, `btc_15m`, `btc_1h`, `btc_daily_threshold`). Architecturally split into three layers:
 
-- Deterministic execution built around official Polymarket APIs and `py-clob-client`
-- Research and model-scoring layer using OpenRouter by default
-- Operator-facing CLI and deployment model designed for safe paper trading first, then tightly gated live trading
+- **Deterministic quant scoring** (closed-form Black-Scholes + GBM + microstructure) — the hot path. Originally designed to route through an LLM (hence "AI"); the LLM path is still wired as an optional veto-only advisor, but the default decision path is fully deterministic and runs in ~2 ms per tick.
+- **Event-driven execution** — Polymarket CLOB websocket + Binance BTC websocket, persistent per-market state, maker-first router with taker fallback, paper fills via VWAP book walk, live orders via `py-clob-client`.
+- **Operator-facing CLI + FastAPI backend + React dashboard** — designed for safe paper trading first, then tightly gated live trading (requires `TRADING_MODE=live`, `LIVE_TRADING_ENABLED=true`, valid auth, preflight pass, and `--confirm-live`).
 
 ## Current Status
 
-The repository includes a working paper and read-only live-readiness stack, plus Phases 1–5 of the short-horizon BTC trading core (see [`docs/ROADMAP.md`](./docs/ROADMAP.md)).
+Production paper-trading system with 246 tests. Works end-to-end: WebSocket discovery → quant scoring → risk gating → paper execution → position tracking → dashboard.
 
 - Python package under `src/polymarket_ai_agent`
 - operator CLI via `polymarket-ai-agent`
