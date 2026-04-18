@@ -1178,13 +1178,17 @@ function DaemonView({ heartbeat, ticks }: { heartbeat: DaemonHeartbeatPayload | 
   const hb = heartbeat?.heartbeat ?? null;
   const age = heartbeat?.age_seconds ?? null;
   const metrics = hb?.metrics ?? null;
+  // `heartbeat === null` means we haven't received the first SSE payload yet;
+  // don't render a scary "daemon not running" banner during that initial window.
+  const heartbeatLoaded = heartbeat !== null;
   const daemonRunning = age !== null && age < 60;
+  const showStaleBanner = heartbeatLoaded && !daemonRunning;
   const [timezone, setTimezone] = useLocalStorage<string>("display.timezone", BROWSER_TZ);
   const [timeFormat, setTimeFormat] = useLocalStorage<TimeFormat>("display.timeFormat", "24h");
 
   return (
     <>
-      {!daemonRunning && (
+      {showStaleBanner && (
         <div className="banner error">Daemon not running — heartbeat is absent or stale.</div>
       )}
 
