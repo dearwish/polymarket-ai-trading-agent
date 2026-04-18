@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,6 +42,7 @@ class BinanceBtcFeed:
         reconnect_backoff_seconds: float = 2.0,
         reconnect_backoff_max_seconds: float = 30.0,
         http_client: httpx.Client | None = None,
+        ssl_verify: bool = True,
     ):
         self._ws_url = ws_url
         self._rest_url = rest_url
@@ -50,7 +52,15 @@ class BinanceBtcFeed:
             self._reconnect_backoff_seconds,
             reconnect_backoff_max_seconds,
         )
-        self._http_client = http_client or httpx.Client(timeout=10)
+        self._http_client = http_client or httpx.Client(timeout=10, verify=ssl_verify)
+        self._ssl_context: ssl.SSLContext | bool = ssl_verify or self._make_insecure_ctx()
+
+    @staticmethod
+    def _make_insecure_ctx() -> ssl.SSLContext:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
 
     def stream_url(self) -> str:
         streams = f"{self._symbol}@aggTrade/{self._symbol}@bookTicker"
@@ -63,7 +73,7 @@ class BinanceBtcFeed:
         backoff = self._reconnect_backoff_seconds
         while stop_event is None or not stop_event.is_set():
             try:
-                async with websockets_mod.connect(self.stream_url()) as websocket:
+                async with websockets_mod.connect(self.stream_url(), ssl=self._ssl_context) as websocket:
                     backoff = self._reconnect_backoff_seconds
                     async for raw_message in websocket:
                         if stop_event is not None and stop_event.is_set():

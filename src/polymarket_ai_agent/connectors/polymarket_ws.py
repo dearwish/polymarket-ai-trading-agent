@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -27,6 +28,7 @@ class PolymarketMarketStream:
         url: str,
         reconnect_backoff_seconds: float = 2.0,
         reconnect_backoff_max_seconds: float = 30.0,
+        ssl_verify: bool = True,
     ):
         self.url = url
         self._reconnect_backoff_seconds = max(0.1, reconnect_backoff_seconds)
@@ -34,13 +36,21 @@ class PolymarketMarketStream:
             self._reconnect_backoff_seconds,
             reconnect_backoff_max_seconds,
         )
+        self._ssl_context: ssl.SSLContext | bool = ssl_verify or self._make_insecure_ctx()
+
+    @staticmethod
+    def _make_insecure_ctx() -> ssl.SSLContext:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
 
     async def subscribe(self, asset_ids: Iterable[str]) -> AsyncIterator[MarketStreamEvent]:
         asset_list = [asset_id for asset_id in asset_ids if asset_id]
         if not asset_list:
             return
         websockets_mod = self._import_websockets()
-        async with websockets_mod.connect(self.url) as websocket:
+        async with websockets_mod.connect(self.url, ssl=self._ssl_context) as websocket:
             await websocket.send(self._subscription_payload(asset_list))
             async for raw_message in websocket:
                 for event in self._parse_messages(raw_message):
@@ -63,7 +73,7 @@ class PolymarketMarketStream:
         backoff = self._reconnect_backoff_seconds
         while stop_event is None or not stop_event.is_set():
             try:
-                async with websockets_mod.connect(self.url) as websocket:
+                async with websockets_mod.connect(self.url, ssl=self._ssl_context) as websocket:
                     await websocket.send(self._subscription_payload(asset_list))
                     backoff = self._reconnect_backoff_seconds
                     async for raw_message in websocket:

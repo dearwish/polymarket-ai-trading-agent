@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     btc_rest_fallback_url: str = "https://api.binance.com/api/v3/ticker/price"
     ws_reconnect_backoff_seconds: float = 2.0
     ws_reconnect_backoff_max_seconds: float = 30.0
+    ws_ssl_verify: bool = True
     daemon_discovery_interval_seconds: int = 60
     daemon_decision_min_interval_seconds: float = 1.0
     polymarket_private_key: str = ""

@@ -128,6 +128,7 @@ class DaemonRunner:
                 url,
                 reconnect_backoff_seconds=settings.ws_reconnect_backoff_seconds,
                 reconnect_backoff_max_seconds=settings.ws_reconnect_backoff_max_seconds,
+                ssl_verify=settings.ws_ssl_verify,
             )
         )
         self._btc_feed_factory = btc_feed_factory or (
@@ -137,6 +138,7 @@ class DaemonRunner:
                 symbol=settings.btc_symbol,
                 reconnect_backoff_seconds=settings.ws_reconnect_backoff_seconds,
                 reconnect_backoff_max_seconds=settings.ws_reconnect_backoff_max_seconds,
+                ssl_verify=settings.ws_ssl_verify,
             )
         )
         self._decision_callback = decision_callback or self._default_decision_callback
