@@ -26,6 +26,16 @@ class ExecutionMode(str, Enum):
     LIVE = "live"
 
 
+class OrderSide(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class ExecutionStyle(str, Enum):
+    FOK_TAKER = "FOK_TAKER"
+    GTC_MAKER = "GTC_MAKER"
+
+
 @dataclass(slots=True)
 class MarketCandidate:
     market_id: str
@@ -50,6 +60,8 @@ class OrderBookSnapshot:
     depth_usd: float
     last_trade_price: float
     two_sided: bool = True
+    bid_levels: list[tuple[float, float]] = field(default_factory=list)
+    ask_levels: list[tuple[float, float]] = field(default_factory=list)
     observed_at: datetime = field(default_factory=utc_now)
 
 
@@ -130,6 +142,10 @@ class TradeDecision:
     rationale: list[str]
     rejected_by: list[str]
     asset_id: str = ""
+    order_side: OrderSide = OrderSide.BUY
+    intent: str = "OPEN"
+    execution_style: ExecutionStyle = ExecutionStyle.FOK_TAKER
+    post_only: bool = False
     decided_at: datetime = field(default_factory=utc_now)
 
 
@@ -142,6 +158,11 @@ class ExecutionResult:
     status: str
     detail: str
     fill_price: float = 0.0
+    filled_size_shares: float = 0.0
+    remaining_size_shares: float = 0.0
+    execution_style: ExecutionStyle = ExecutionStyle.FOK_TAKER
+    order_side: OrderSide = OrderSide.BUY
+    asset_id: str = ""
     executed_at: datetime = field(default_factory=utc_now)
 
 

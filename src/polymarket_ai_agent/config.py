@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     paper_exit_slippage_bps: float = 10.0
 
     fee_bps: float = 0.0
+    execution_maker_min_edge: float = 0.04
+    execution_maker_min_tte_seconds: int = 120
+    execution_price_tick: float = 0.01
+    execution_exit_buffer_floor_seconds: int = 10
+    execution_exit_buffer_pct_of_tte: float = 0.1
     quant_drift_damping: float = 0.5
     quant_imbalance_tilt: float = 0.03
     quant_slippage_baseline_bps: float = 15.0
