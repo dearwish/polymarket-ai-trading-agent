@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     # buffer kicks in right before market resolution.
     paper_take_profit_pct: float = 0.0
     paper_stop_loss_pct: float = 0.0
+    # Trailing stop: track peak token price since entry; close when current
+    # drops by `paper_trailing_stop_pct` of the peak. 0.0 disables.
+    paper_trailing_stop_pct: float = 0.0
+    # Scale-out / tiered take-profit ladder. Comma-separated list of
+    #   "<pnl_pct>:<fraction_to_close>" pairs, e.g. "0.15:0.5,0.30:0.25"
+    # meaning: at +15% PnL close 50% of the position, at +30% close another
+    # 25%. Tranches fire in order; each only once per open position. Empty
+    # string disables the ladder entirely (fixed TP / trailing / TTE still
+    # apply to the remainder).
+    paper_tp_ladder: str = ""
     polymarket_private_key: str = ""
     polymarket_funder: str = ""
     polymarket_signature_type: int = 0
@@ -178,6 +188,19 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 1,
         "step": 0.01,
+        "group": "paper",
+    },
+    "paper_trailing_stop_pct": {
+        "label": "Paper Trailing Stop %",
+        "type": "number",
+        "min": 0,
+        "max": 1,
+        "step": 0.01,
+        "group": "paper",
+    },
+    "paper_tp_ladder": {
+        "label": "Paper TP Ladder (pct:fraction,...)",
+        "type": "text",
         "group": "paper",
     },
 }

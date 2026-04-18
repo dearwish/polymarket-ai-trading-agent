@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -452,6 +453,65 @@ class PortfolioEngine:
             )
             conn.commit()
         return PositionAction(market_id=market_id, action="CLOSE", reason=reason)
+
+    def partial_close_position(
+        self,
+        market_id: str,
+        fraction: float,
+        exit_price: float,
+        reason: str,
+        now: datetime | None = None,
+    ) -> PositionAction:
+        """Close a fraction (0 < f < 1) of an open position.
+
+        Splits the open row: the closed tranche becomes its own CLOSED row
+        with a suffixed order_id; the remaining OPEN row's size_usd shrinks
+        by the same fraction. fraction >= 1.0 falls back to a full close.
+        """
+        if fraction >= 1.0:
+            return self.close_position(market_id, exit_price, reason, now=now)
+        if fraction <= 0.0:
+            return PositionAction(market_id=market_id, action="NOOP", reason="fraction must be > 0")
+        current = now or _utc_now()
+        position = self._get_open_position(market_id)
+        if not position:
+            return PositionAction(market_id=market_id, action="NOOP", reason="Position not open.")
+        closed_size = position.size_usd * fraction
+        remaining_size = position.size_usd - closed_size
+        # Re-express the closed tranche as its own PositionRecord shape so we
+        # reuse the same entry_price-based PnL formula.
+        closed_tranche = replace(position, size_usd=closed_size)
+        closed_pnl = self._compute_pnl(closed_tranche, exit_price)
+        tranche_order_id = f"{position.order_id}-T{current.timestamp():.0f}" if position.order_id else ""
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            # Shrink the open row.
+            conn.execute(
+                "update positions set size_usd = ? where market_id = ? and status = 'OPEN'",
+                (remaining_size, market_id),
+            )
+            # Insert the closed tranche as a new row.
+            conn.execute(
+                """
+                insert into positions(
+                    market_id, side, size_usd, entry_price, order_id, opened_at, status,
+                    close_reason, closed_at, exit_price, realized_pnl
+                ) values (?, ?, ?, ?, ?, ?, 'CLOSED', ?, ?, ?, ?)
+                """,
+                (
+                    market_id,
+                    position.side.value,
+                    closed_size,
+                    position.entry_price,
+                    tranche_order_id,
+                    position.opened_at.isoformat(),
+                    reason,
+                    current.isoformat(),
+                    exit_price,
+                    closed_pnl,
+                ),
+            )
+            conn.commit()
+        return PositionAction(market_id=market_id, action="PARTIAL_CLOSE", reason=reason)
 
     def _get_open_position(self, market_id: str) -> PositionRecord | None:
         with closing(sqlite3.connect(self.db_path)) as conn, conn:

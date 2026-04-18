@@ -410,6 +410,13 @@ def _setup_runner_with_open_yes_position(tmp_path, entry_price: float, settings_
         "min_depth_usd": 0.0,
         "stale_data_seconds": 3600,
         "max_concurrent_positions": 5,
+        # Explicitly disable every exit knob so each test opts into exactly
+        # the ones it wants. Otherwise real .env values leak in and fire
+        # before the feature under test.
+        "paper_take_profit_pct": 0.0,
+        "paper_stop_loss_pct": 0.0,
+        "paper_trailing_stop_pct": 0.0,
+        "paper_tp_ladder": "",
     }
     base_overrides.update(settings_overrides)
     settings = _settings(tmp_path).model_copy(update=base_overrides)
@@ -503,6 +510,109 @@ def test_paper_stop_loss_closes_position_when_mid_drops(tmp_path) -> None:
     closed = service.portfolio.list_closed_positions(limit=1)
     assert closed[0].close_reason == "paper_stop_loss"
     assert closed[0].realized_pnl < 0
+
+
+def test_paper_trailing_stop_rides_up_then_exits_on_reversal(tmp_path) -> None:
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    runner, service, candidate, approved, btc = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50, settings_overrides={"paper_trailing_stop_pct": 0.10},
+    )
+    # Ride up: mid jumps to 0.80, peak tracked.
+    state_up = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state_up.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.79", "size": "500"}],
+        "asks": [{"price": "0.81", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state_up
+    ctx_up = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state_up.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx_up))
+    # Still open — trailing stop is 0.80 × 0.90 = 0.72, mid is 0.80, well above.
+    assert len(service.portfolio.list_open_positions()) == 1
+    assert runner._position_extras[candidate.market_id]["peak_price"] >= 0.80
+
+    # Reverse: mid drops to 0.70, below the 0.72 trailing level → exit.
+    state_down = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state_down.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.69", "size": "500"}],
+        "asks": [{"price": "0.71", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state_down
+    ctx_down = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state_down.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx_down))
+    assert service.portfolio.list_open_positions() == []
+    closed = service.portfolio.list_closed_positions(limit=1)
+    assert closed[0].close_reason == "paper_trailing_stop"
+    assert closed[0].realized_pnl > 0  # Peak was 0.80, exit at 0.70 still above 0.50 entry.
+
+
+def test_paper_tp_ladder_closes_position_in_tranches(tmp_path) -> None:
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    # Ladder: close 50% at +15%, close another 25% at +30%. Remainder (25%)
+    # sits open unless another exit fires.
+    runner, service, candidate, approved, btc = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50,
+        settings_overrides={"paper_tp_ladder": "0.15:0.5,0.30:0.25"},
+    )
+    # +17%: triggers tranche 1 (close 50%). Entry price stored is 0.51051
+    # (0.51 ask × default 10bps slippage), so threshold is ~0.587.
+    state1 = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state1.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.59", "size": "500"}],
+        "asks": [{"price": "0.61", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state1
+    ctx1 = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state1.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx1))
+    open_positions = service.portfolio.list_open_positions()
+    assert len(open_positions) == 1
+    assert abs(open_positions[0].size_usd - 5.0) < 1e-6  # 50% of $10 left.
+    closed_after_first = service.portfolio.list_closed_positions(limit=5)
+    assert any(p.close_reason == "paper_tp_ladder_1" for p in closed_after_first)
+
+    # +37%: triggers tranche 2 (close 25% of CURRENT remaining).
+    state2 = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state2.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.69", "size": "500"}],
+        "asks": [{"price": "0.71", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state2
+    ctx2 = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state2.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx2))
+    open_positions = service.portfolio.list_open_positions()
+    # Tranche 2 closes 25% of CURRENT remaining = 25% × 5 = 1.25, leaving 3.75.
+    assert len(open_positions) == 1
+    assert abs(open_positions[0].size_usd - 3.75) < 1e-6
+    closed_after_second = service.portfolio.list_closed_positions(limit=5)
+    assert any(p.close_reason == "paper_tp_ladder_2" for p in closed_after_second)
+
+
+def test_tp_ladder_parser_ignores_malformed_pairs() -> None:
+    from polymarket_ai_agent.apps.daemon.run import DaemonRunner
+    assert DaemonRunner._parse_tp_ladder("") == []
+    assert DaemonRunner._parse_tp_ladder("0.15:0.5") == [(0.15, 0.5)]
+    # Malformed pieces skipped; valid ones sorted ascending by pct.
+    parsed = DaemonRunner._parse_tp_ladder("0.30:0.25,bogus,0.15:0.5,-0.1:0.5,0.20:2.0")
+    assert parsed == [(0.15, 0.5), (0.30, 0.25)]
 
 
 def test_agent_service_attributes_available() -> None:

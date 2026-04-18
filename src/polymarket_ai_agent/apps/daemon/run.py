@@ -167,6 +167,10 @@ class DaemonRunner:
         self._market_subscriber_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
         self._last_decision_at: datetime | None = None
+        # Per-open-position state used by trailing stop / tranche ladder logic.
+        # Paper-mode only: lives in memory, reset if the daemon restarts.
+        self._position_extras: dict[str, dict[str, float]] = {}
+        self._tp_ladder: list[tuple[float, float]] = self._parse_tp_ladder(settings.paper_tp_ladder)
 
     @property
     def active_asset_ids(self) -> list[str]:
@@ -373,6 +377,32 @@ class DaemonRunner:
         self.metrics.last_decision_latency_ms = round(elapsed, 3)
 
     @staticmethod
+    def _parse_tp_ladder(raw: str) -> list[tuple[float, float]]:
+        """Parse "0.15:0.5,0.30:0.25" into [(0.15, 0.5), (0.30, 0.25)].
+
+        Invalid pairs are silently skipped. Ladder is sorted ascending by
+        PnL-pct so the daemon can walk it left-to-right.
+        """
+        if not raw:
+            return []
+        pairs: list[tuple[float, float]] = []
+        for chunk in raw.split(","):
+            chunk = chunk.strip()
+            if ":" not in chunk:
+                continue
+            left, right = chunk.split(":", 1)
+            try:
+                pct = float(left)
+                frac = float(right)
+            except ValueError:
+                continue
+            if pct <= 0 or not (0.0 < frac <= 1.0):
+                continue
+            pairs.append((pct, frac))
+        pairs.sort(key=lambda item: item[0])
+        return pairs
+
+    @staticmethod
     def _seconds_to_expiry(end_date_iso: str, now: datetime | None = None) -> int:
         if not end_date_iso:
             return 0
@@ -438,15 +468,49 @@ class DaemonRunner:
         if orderbook is None:
             return  # No usable book yet — skip this tick.
 
-        # Manage an already-open position: take-profit / stop-loss / TTE-exit.
-        # TP and SL fire first so we don't give back profits (or eat full drawdown)
-        # just because TTE hasn't reached the exit buffer yet.
+        # Manage an already-open position.
+        # Exit priority (first match wins, checked every tick):
+        #   1. TP ladder (partial closes at +X% PnL)
+        #   2. Trailing stop (full close if current drops `trail_pct` below peak)
+        #   3. Fixed take-profit (full close at +X% PnL)
+        #   4. Fixed stop-loss (full close at -Y% PnL)
+        #   5. TTE exit buffer (full close near expiry at current mid)
         open_pos = await asyncio.to_thread(self.service.portfolio.get_open_position, market_id)
         if open_pos is not None:
             current_price = features.mid_yes if open_pos.side == SuggestedSide.YES else features.mid_no
             entry_price = float(open_pos.entry_price)
             if current_price > 0.0 and entry_price > 0.0:
                 pnl_pct = (current_price - entry_price) / entry_price
+                extras = self._position_extras.setdefault(market_id, {"peak_price": 0.0, "tranches_closed": 0.0})
+                if current_price > extras["peak_price"]:
+                    extras["peak_price"] = current_price
+                # --- 1. TP ladder (partial close) -------------------------
+                tranches_closed = int(extras["tranches_closed"])
+                if tranches_closed < len(self._tp_ladder):
+                    next_pct, next_frac = self._tp_ladder[tranches_closed]
+                    if pnl_pct >= next_pct:
+                        await asyncio.to_thread(
+                            self.service.portfolio.partial_close_position,
+                            market_id,
+                            float(next_frac),
+                            float(current_price),
+                            f"paper_tp_ladder_{tranches_closed + 1}",
+                        )
+                        extras["tranches_closed"] = tranches_closed + 1
+                        return
+                # --- 2. Trailing stop (full close) ------------------------
+                trail_pct = float(self.settings.paper_trailing_stop_pct)
+                peak = extras["peak_price"]
+                if trail_pct > 0.0 and peak > entry_price and current_price <= peak * (1.0 - trail_pct):
+                    await asyncio.to_thread(
+                        self.service.portfolio.close_position,
+                        market_id,
+                        float(current_price),
+                        "paper_trailing_stop",
+                    )
+                    self._position_extras.pop(market_id, None)
+                    return
+                # --- 3 + 4. Fixed TP / SL ---------------------------------
                 tp_pct = float(self.settings.paper_take_profit_pct)
                 sl_pct = float(self.settings.paper_stop_loss_pct)
                 close_reason: str | None = None
@@ -461,7 +525,9 @@ class DaemonRunner:
                         float(current_price),
                         close_reason,
                     )
+                    self._position_extras.pop(market_id, None)
                     return
+            # --- 5. TTE exit buffer ---------------------------------------
             exit_buffer = self.service.risk.exit_buffer_seconds_for_tte(tte_seconds)
             if tte_seconds <= exit_buffer and current_price > 0.0:
                 await asyncio.to_thread(
@@ -470,7 +536,10 @@ class DaemonRunner:
                     float(current_price),
                     "paper_tte_exit",
                 )
+                self._position_extras.pop(market_id, None)
             return  # Do not open a duplicate while a position is live.
+        # Clean up extras if no open position exists (e.g., previous TTE close).
+        self._position_extras.pop(market_id, None)
 
         snapshot = MarketSnapshot(
             candidate=candidate,

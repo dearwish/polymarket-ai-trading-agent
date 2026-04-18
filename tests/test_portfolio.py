@@ -93,6 +93,61 @@ def test_portfolio_closes_position_and_realizes_pnl(settings) -> None:
     assert closed[0].close_reason == "ttl_expired"
 
 
+def test_portfolio_partial_close_splits_position(settings) -> None:
+    engine = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
+    decision = TradeDecision(
+        market_id="ladder-mkt",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.50,
+        rationale=["approved"],
+        rejected_by=[],
+    )
+    result = ExecutionResult(
+        market_id="ladder-mkt",
+        success=True,
+        mode=ExecutionMode.PAPER,
+        order_id="paper-ladder-1",
+        status="FILLED_PAPER",
+        detail="ok",
+        fill_price=0.50,
+    )
+    engine.record_execution(decision, result)
+    action = engine.partial_close_position("ladder-mkt", fraction=0.5, exit_price=0.60, reason="paper_tp_ladder_1")
+    assert action.action == "PARTIAL_CLOSE"
+    open_positions = engine.list_open_positions()
+    assert len(open_positions) == 1
+    assert abs(open_positions[0].size_usd - 5.0) < 1e-6
+    closed = engine.list_closed_positions(limit=5)
+    assert len(closed) == 1
+    assert closed[0].size_usd == 5.0
+    # PnL for the closed 5.0 USD half: (0.60 - 0.50) × (5 / 0.50) = 1.00
+    assert abs(closed[0].realized_pnl - 1.0) < 1e-6
+    assert closed[0].close_reason == "paper_tp_ladder_1"
+
+
+def test_portfolio_partial_close_at_full_fraction_falls_through_to_full_close(settings) -> None:
+    engine = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
+    decision = TradeDecision(
+        market_id="full-mkt",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.50,
+        rationale=["approved"],
+        rejected_by=[],
+    )
+    result = ExecutionResult(
+        market_id="full-mkt", success=True, mode=ExecutionMode.PAPER,
+        order_id="paper-full-1", status="FILLED_PAPER", detail="ok", fill_price=0.50,
+    )
+    engine.record_execution(decision, result)
+    action = engine.partial_close_position("full-mkt", fraction=1.0, exit_price=0.60, reason="paper_take_profit")
+    assert action.action == "CLOSE"
+    assert engine.list_open_positions() == []
+
+
 def test_portfolio_no_side_pnl_sign_is_correct(settings) -> None:
     """Buying NO at 0.52 and closing at 0.80 should be a WIN (+), not a loss.
 
