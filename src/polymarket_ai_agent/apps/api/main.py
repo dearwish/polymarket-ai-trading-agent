@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -20,6 +21,19 @@ from polymarket_ai_agent.config import (
     save_runtime_overrides,
 )
 from polymarket_ai_agent.service import AgentService
+
+
+_SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _cached(key: str, ttl: float, fn: Callable[[], Any]) -> Any:
+    """Return a cached result; re-invoke fn when the entry is older than ttl seconds."""
+    entry = _SNAPSHOT_CACHE.get(key)
+    if entry and (time.monotonic() - entry[0]) < ttl:
+        return entry[1]
+    result = fn()
+    _SNAPSHOT_CACHE[key] = (time.monotonic(), result)
+    return result
 
 
 def get_service() -> AgentService:
@@ -209,7 +223,7 @@ def create_app(
             return {
                 "readonly": True,
                 "market_id": "",
-                "auth": service.auth_status(),
+                "auth": _cached("auth", 60.0, service.auth_status),
                 "preflight": {
                     "blockers": ["no_active_market"],
                     "market": {
@@ -261,17 +275,17 @@ def create_app(
     def build_dashboard_snapshot(service: AgentService) -> dict:
         return {
             "status": service.status(),
-            "auth": service.auth_status(),
+            "auth": _cached("auth", 60.0, service.auth_status),
             "settings": runtime_settings_payload(service.settings),
-            "live_activity": safe_live_activity(service),
+            "live_activity": _cached("live_activity", 30.0, lambda: safe_live_activity(service)),
             "portfolio_summary": portfolio_summary(service=service),
             "closed_positions": closed_positions(limit=100, service=service),
             "equity_curve": equity_curve(limit=200, service=service),
-            "report": report(session_id=None, service=service),
+            "report": _cached("report", 60.0, lambda: report(session_id=None, service=service)),
             "recent_events": recent_events(limit=12, service=service),
             "recent_decisions": recent_decisions(limit=50, service=service),
-            "live_orders": live_orders(service=service),
-            "live_trades": live_trades(limit=20, service=service),
+            "live_orders": _cached("live_orders", 30.0, lambda: live_orders(service=service)),
+            "live_trades": _cached("live_trades", 30.0, lambda: live_trades(limit=20, service=service)),
             "daemon_heartbeat": _daemon_heartbeat_payload(service.settings),
             "daemon_ticks": _latest_daemon_ticks(service),
         }
