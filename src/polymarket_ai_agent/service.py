@@ -42,7 +42,12 @@ class AgentService:
             router=ExecutionRouter(settings),
             settings=settings,
         )
-        self.journal = Journal(settings.db_path, settings.events_path)
+        self.journal = Journal(
+            settings.db_path,
+            settings.events_path,
+            events_jsonl_max_bytes=settings.events_jsonl_max_bytes,
+            events_jsonl_keep_tail_bytes=settings.events_jsonl_keep_tail_bytes,
+        )
         self.portfolio = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
 
     def discover_markets(self):
