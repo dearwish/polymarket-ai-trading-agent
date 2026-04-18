@@ -91,8 +91,11 @@ class QuantScoringEngine:
         return float(self.settings.quant_default_vol_per_second)
 
     def _drift_log_return(self, packet: EvidencePacket) -> float:
+        # For threshold markets ("above $K"), use ln(S_now/K) as the drift signal
+        # so the model scores distance-to-strike rather than short-term momentum.
+        if packet.btc_log_return_vs_strike != 0.0:
+            return float(packet.btc_log_return_vs_strike)
         horizon = float(self.settings.quant_drift_horizon_seconds)
-        # Prefer the horizon that best matches the configured drift lookback.
         if horizon >= 600.0 and packet.btc_log_return_15m != 0.0:
             return float(packet.btc_log_return_15m)
         if packet.btc_log_return_5m != 0.0:

@@ -101,6 +101,8 @@ class EvidencePacket:
     btc_log_return_5m: float = 0.0
     btc_log_return_15m: float = 0.0
     realized_vol_30m: float = 0.0
+    # For threshold markets ("above $K"): ln(BTC_now / K). Zero for non-threshold.
+    btc_log_return_vs_strike: float = 0.0
     time_elapsed_in_candle_s: int = 0
     generated_at: datetime = field(default_factory=utc_now)
 

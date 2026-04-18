@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import math
+import re
+
 from polymarket_ai_agent.engine.btc_state import BtcSnapshot
 from polymarket_ai_agent.engine.market_state import MarketFeatures
 from polymarket_ai_agent.types import EvidencePacket, MarketCandidate, MarketSnapshot
+
+_STRIKE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d+)?)")
 
 
 class ResearchEngine:
@@ -87,6 +92,7 @@ class ResearchEngine:
             "Polymarket CLOB websocket",
             "Binance BTCUSDT websocket",
         ]
+        log_return_vs_strike = self._log_return_vs_strike(candidate.question, btc_price)
         return EvidencePacket(
             market_id=candidate.market_id,
             question=candidate.question,
@@ -112,4 +118,21 @@ class ResearchEngine:
             btc_log_return_15m=btc_return_15m,
             realized_vol_30m=realized_vol_30m,
             time_elapsed_in_candle_s=time_elapsed_in_candle_s,
+            btc_log_return_vs_strike=log_return_vs_strike,
         )
+
+    @staticmethod
+    def _log_return_vs_strike(question: str, btc_price: float) -> float:
+        """Return ln(btc_price / strike) for threshold questions, 0.0 otherwise."""
+        if btc_price <= 0.0:
+            return 0.0
+        match = _STRIKE_RE.search(question)
+        if not match:
+            return 0.0
+        try:
+            strike = float(match.group(1).replace(",", ""))
+        except ValueError:
+            return 0.0
+        if strike <= 0.0:
+            return 0.0
+        return math.log(btc_price / strike)
