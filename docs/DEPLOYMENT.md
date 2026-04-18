@@ -115,6 +115,142 @@ If the project grows, split deployment like this:
 
 Do not separate them for v1 unless there is a clear operational reason.
 
+## systemd + Retention + Backup (Phase 5)
+
+The daemon is designed to run under a process supervisor. The recommended
+stack on a VPS is `systemd` for the daemon, `systemd` timers (or `cron`) for
+backups, `logrotate` for the event journal, and the operator API behind
+`uvicorn` or a local reverse proxy.
+
+### polymarket-ai-agent.service
+
+```ini
+[Unit]
+Description=Polymarket AI Agent daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket-ai-agent
+EnvironmentFile=/opt/polymarket-ai-agent/.env
+ExecStart=/opt/polymarket-ai-agent/.venv/bin/polymarket-ai-agent daemon
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# Tighten the sandbox if systemd version supports it:
+ProtectSystem=strict
+ReadWritePaths=/opt/polymarket-ai-agent/data /opt/polymarket-ai-agent/logs
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Drop that into `/etc/systemd/system/polymarket-ai-agent.service`, then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now polymarket-ai-agent.service
+sudo systemctl status polymarket-ai-agent.service
+journalctl -u polymarket-ai-agent -f   # live log tail
+```
+
+### polymarket-ai-agent-api.service (optional)
+
+Mirror the daemon unit but with `ExecStart=.../polymarket-ai-agent-api` and
+expose it over a local loopback (or via an HTTPS reverse proxy) for the
+dashboard to poll `/api/metrics` and `/api/healthz`.
+
+### Backups via VACUUM INTO
+
+`make backup DEST=/var/backups/polymarket` (or the CLI directly) produces a
+consistent standalone `agent.db.<utc>` snapshot while the daemon is still
+writing, thanks to SQLite's `VACUUM INTO` + WAL mode.
+
+A `systemd` timer that backs up nightly and uploads off-host:
+
+```ini
+# /etc/systemd/system/polymarket-agent-backup.service
+[Unit]
+Description=Polymarket agent SQLite backup
+
+[Service]
+Type=oneshot
+User=polymarket
+EnvironmentFile=/opt/polymarket-ai-agent/.env
+ExecStart=/opt/polymarket-ai-agent/.venv/bin/polymarket-ai-agent backup /var/backups/polymarket/
+ExecStartPost=/usr/bin/rsync -a /var/backups/polymarket/ backup@off-host:/srv/polymarket-agent-backups/
+```
+
+```ini
+# /etc/systemd/system/polymarket-agent-backup.timer
+[Unit]
+Description=Nightly Polymarket agent SQLite backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl enable --now polymarket-agent-backup.timer
+```
+
+### Maintenance (retention + VACUUM)
+
+The daemon already runs retention + WAL checkpoint on
+`DAEMON_MAINTENANCE_INTERVAL_SECONDS` (default 1 hour) and auto-prunes
+`events.jsonl` every `~200` writes once it crosses
+`EVENTS_JSONL_MAX_BYTES` (default 200 MB, keeping the tail 50 MB). Manual
+knobs from the operator CLI:
+
+```bash
+make maintenance          # prune history + WAL checkpoint
+make maintenance-vacuum   # same + full VACUUM (takes exclusive lock)
+```
+
+Schedule a weekly `VACUUM` with another `systemd` timer if you want a
+compaction pass that reclaims pages after large deletions.
+
+### logrotate for events.jsonl
+
+The daemon's auto-prune is the primary defence, but `logrotate` also works
+as a belt-and-suspenders rotation:
+
+```text
+# /etc/logrotate.d/polymarket-ai-agent
+/opt/polymarket-ai-agent/logs/events.jsonl {
+    daily
+    rotate 7
+    size 200M
+    copytruncate
+    missingok
+    notifempty
+    compress
+}
+```
+
+### Kill-switch observability
+
+`/api/healthz` returns non-200-ready when any check fails, including:
+
+- heartbeat stale beyond `DAEMON_HEARTBEAT_STALE_SECONDS` (default 30s)
+- authenticated readonly probe fails while in live mode
+- `safety_stop_reason` fires (`daily_loss_limit`, `rejected_order_limit`,
+  `auth_not_ready`, `daemon_heartbeat_stale`)
+
+Point your uptime monitor (UptimeRobot, Pingdom, `healthchecks.io`) at
+`/api/healthz` and alert on failure. Prometheus users should scrape
+`/api/metrics?format=prometheus` — the `polymarket_agent_safety_stop_triggered`
+gauge is exactly what an alert rule needs.
+
 ## Operational Requirements
 
 Wherever the worker runs, require:

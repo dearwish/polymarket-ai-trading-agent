@@ -8,7 +8,7 @@ Python project for a Polymarket trading agent with three clearly separated layer
 
 ## Current Status
 
-The repository includes a working paper and read-only live-readiness stack, plus Phases 1–4 of the short-horizon BTC trading core (see [`docs/ROADMAP.md`](./docs/ROADMAP.md)).
+The repository includes a working paper and read-only live-readiness stack, plus Phases 1–5 of the short-horizon BTC trading core (see [`docs/ROADMAP.md`](./docs/ROADMAP.md)).
 
 - Python package under `src/polymarket_ai_agent`
 - operator CLI via `polymarket-ai-agent`
@@ -26,7 +26,8 @@ The repository includes a working paper and read-only live-readiness stack, plus
 - **maker-first / taker-fallback execution router** with VWAP paper fills, SELL-side support, live-fill → PositionRecord bridge, and a `close_position` path that posts a SELL-side counter order on Polymarket (Phase 3)
 - **per-family risk profiles** (btc_1h / btc_15m / btc_5m) with tighter stale-data ceilings, a dynamic exit buffer scaled against the family's candle window, a correlation cap on net BTC directional exposure, and `max_concurrent_positions` replacing the single-position rule (Phase 4)
 - **SQLite hygiene** — WAL mode, `synchronous=NORMAL`, explicit indexes on every hot lookup column, bounded `events.jsonl` tail reads, and an auto-prune loop (Phase 4; see the SQLite & Log-Growth Risk section in `docs/ROADMAP.md`)
-- test suite covering connectors, scoring, risk, execution, service, CLI, state/daemon/feed modules, the execution router and VWAP fills, live fill bridging, the live close flow, per-family risk profiles, btc_15m discovery, and journal retention
+- **operational readiness** — daemon heartbeat file, `/api/healthz` + `/api/metrics` (JSON + Prometheus), background retention / WAL-checkpoint / size-gauge maintenance loop, VACUUM INTO backups, kill-switch on auth failure + stale heartbeat, systemd units + nightly backup timer + logrotate in `docs/DEPLOYMENT.md` (Phase 5)
+- test suite covering connectors, scoring, risk, execution, service, CLI, state/daemon/feed modules, the execution router and VWAP fills, live fill bridging, the live close flow, per-family risk profiles, btc_15m discovery, journal retention, heartbeats, `/api/metrics`/`/api/healthz`, and daemon kill-switch gating — **244 tests**
 
 Important:
 
@@ -227,6 +228,40 @@ The daemon is an append-heavy writer; both `data/agent.db` and `logs/events.json
 - `Journal.prune_events_jsonl(max_bytes, keep_tail_bytes)` + `log_event` auto-prune every `prune_check_every` writes once the file exceeds `events_jsonl_max_bytes` (default 200 MB, keeping the last 50 MB)
 
 See **SQLite & Log-Growth Risk Analysis** in [`docs/ROADMAP.md`](./docs/ROADMAP.md) for the full audit of write amplification, locking, WAL checkpointing, and backup concerns — plus the remaining Phase 5 items (retention for `order_attempts`, periodic `VACUUM`, off-host backup, `/api/metrics` db-size gauge).
+
+## Operational Readiness (Phase 5)
+
+The agent ships with the pieces needed to run unattended on a single VPS:
+
+- **Daemon heartbeat** — every `DAEMON_HEARTBEAT_INTERVAL_SECONDS` the daemon writes `data/daemon_heartbeat.json` with its full `DaemonMetrics` (counters, latency, active markets, safety-stop reason). The operator API reads the same file to surface it in `/api/metrics` and `/api/healthz` without needing a shared process.
+- **Kill-switch** — `safety_stop_reason` covers `daily_loss_limit`, `rejected_order_limit`, `auth_not_ready` (live mode only), and `daemon_heartbeat_stale`. When a stop fires the daemon journals a `safety_stop` event and stops firing decision callbacks until the condition clears.
+- **Maintenance loop** — separate from the decision loop, runs every `DAEMON_MAINTENANCE_INTERVAL_SECONDS` (default 1 hour). Prunes history older than `DAEMON_PRUNE_HISTORY_DAYS`, auto-prunes `events.jsonl`, runs `pragma wal_checkpoint(TRUNCATE)`, and refreshes DB / events size gauges.
+- **Backups via VACUUM INTO** — `polymarket-ai-agent backup data/backups/` (or `make backup DEST=...`) produces a consistent, compacted snapshot while the daemon is still writing.
+- **Metrics & health endpoints** — `GET /api/metrics` (or `?format=prometheus`) and `GET /api/healthz` return the signals an uptime monitor + Prometheus scraper need.
+- **Deployment docs** — [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) has ready-to-copy systemd units for the daemon, a nightly `VACUUM INTO` + rsync timer, a logrotate config, and kill-switch alerting guidance.
+
+Operator Makefile shortcuts:
+
+```bash
+make maintenance            # prune + WAL checkpoint
+make maintenance-vacuum     # same + full VACUUM (exclusive lock)
+make backup DEST=data/backups/
+make heartbeat              # dump the most recent heartbeat payload
+```
+
+Prometheus scrape example:
+
+```
+GET /api/metrics?format=prometheus
+# polymarket_agent_db_size_bytes                  4096
+# polymarket_agent_events_jsonl_size_bytes        12345
+# polymarket_agent_heartbeat_age_seconds          2.1
+# polymarket_agent_open_positions                 1
+# polymarket_agent_net_btc_exposure_usd           10.0
+# polymarket_agent_safety_stop_triggered          0
+# polymarket_agent_polymarket_events              4812
+# ...
+```
 
 ## Execution Router (Phase 3)
 

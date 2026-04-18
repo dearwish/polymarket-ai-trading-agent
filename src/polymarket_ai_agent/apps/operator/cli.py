@@ -510,6 +510,85 @@ def daemon(
         _handle_operator_error(exc)
 
 
+@app.command("maintenance")
+def maintenance(
+    prune_days: int = typer.Option(
+        -1,
+        "--prune-days",
+        help="Days of history to keep (order_attempts, closed positions, terminal live orders). "
+        "Defaults to DAEMON_PRUNE_HISTORY_DAYS.",
+    ),
+    vacuum: bool = typer.Option(False, "--vacuum", help="Run full VACUUM (takes an exclusive lock)."),
+) -> None:
+    """Run retention + WAL checkpoint + optional VACUUM against the SQLite state."""
+    try:
+        service = _service()
+        settings = get_settings()
+        days = prune_days if prune_days >= 0 else settings.daemon_prune_history_days
+        history_pruned = service.portfolio.prune_history(days) if days > 0 else {}
+        events_pruned = service.journal.prune_events_jsonl(
+            settings.events_jsonl_max_bytes,
+            keep_tail_bytes=settings.events_jsonl_keep_tail_bytes,
+        )
+        wal = service.portfolio.wal_checkpoint()
+        if vacuum:
+            service.portfolio.vacuum()
+            service.journal.vacuum()
+        payload = {
+            "history_pruned": history_pruned,
+            "events_jsonl_pruned": bool(events_pruned),
+            "wal_checkpoint": {"busy": wal[0], "log_pages": wal[1], "checkpointed_pages": wal[2]},
+            "vacuum": bool(vacuum),
+            "db_size_bytes": service.journal.db_size_bytes(),
+            "events_jsonl_size_bytes": service.journal.events_jsonl_size_bytes(),
+        }
+        console.print_json(json.dumps(payload))
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
+@app.command("backup")
+def backup(
+    destination: str = typer.Argument(..., help="Path to write the backup. A timestamp is appended if it is a directory."),
+) -> None:
+    """Snapshot the SQLite state file via VACUUM INTO."""
+    try:
+        service = _service()
+        import time as _time
+        from pathlib import Path as _Path
+
+        dest = _Path(destination)
+        if dest.is_dir() or destination.endswith("/"):
+            stamp = _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
+            dest = dest / f"agent.db.{stamp}"
+        result = service.portfolio.backup(dest)
+        console.print_json(
+            json.dumps(
+                {
+                    "destination": str(result),
+                    "size_bytes": result.stat().st_size if result.exists() else 0,
+                }
+            )
+        )
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
+@app.command("heartbeat")
+def heartbeat() -> None:
+    """Print the daemon's most recent heartbeat payload (if any)."""
+    try:
+        from polymarket_ai_agent.apps.daemon.heartbeat import HeartbeatReader
+
+        settings = get_settings()
+        reader = HeartbeatReader(settings.heartbeat_path)
+        payload = reader.read()
+        age = reader.age_seconds()
+        console.print_json(json.dumps({"age_seconds": age, "heartbeat": payload}))
+    except Exception as exc:
+        _handle_operator_error(exc)
+
+
 @app.command("simulate-loop")
 def simulate_loop(
     market_id: str = typer.Argument("", help="Explicit market id to simulate."),

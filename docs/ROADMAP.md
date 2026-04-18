@@ -130,7 +130,7 @@ Note on btc_15m: the existing code ships family scorers for `btc_1h`, `btc_5m`, 
 
 Each phase is independently shippable and leaves paper mode working.
 
-**Status:** Phases 1, 2, 3, and 4 have landed on `main`. Phase 5 (operational readiness: daemon, metrics, reconciliation, chaos tests) is next.
+**Status:** Phases 1, 2, 3, 4, and 5 have landed on `main`. Phase 6 (dashboard polish) is optional.
 
 ### Phase 1 — Event-driven market plumbing (foundation) ✅
 Goal: replace REST polling on the hot path with websocket-driven state.
@@ -185,11 +185,16 @@ Verification:
 
 **Tests landing with the phase:** `tests/test_risk_profiles.py`, `tests/test_btc_15m_family.py`, `tests/test_journal_retention.py` — full suite at 224 green.
 
-### Phase 5 — Operational readiness (daemon, metrics, reconciliation)
-- `polymarket-ai-agent daemon` CLI runs forever, auto-reconnect WS.
-- `/api/metrics` (Prometheus text) + `/api/healthz`.
-- Kill-switch hooks.
-- systemd unit + log rotation + SQLite backup cron in `docs/DEPLOYMENT.md`.
+### Phase 5 — Operational readiness (daemon, metrics, reconciliation) ✅
+- `/api/healthz` aggregates DB/heartbeat/auth/safety-stop checks; `/api/metrics` emits JSON + Prometheus text. Both endpoints live in [apps/api/main.py](../src/polymarket_ai_agent/apps/api/main.py).
+- Cross-process `HeartbeatWriter` + `HeartbeatReader` ([apps/daemon/heartbeat.py](../src/polymarket_ai_agent/apps/daemon/heartbeat.py)) lets the API expose the daemon's in-memory counters without an IPC channel.
+- `safety_stop_reason` extended with `auth_not_ready` and `daemon_heartbeat_stale`; the daemon journals a `safety_stop` event the first time each reason fires and skips new decision callbacks while it's hot.
+- Daemon gains `_heartbeat_loop` and `_maintenance_loop` tasks: retention (closed positions + counted rejections + terminal live orders older than `DAEMON_PRUNE_HISTORY_DAYS`), events.jsonl auto-prune, WAL checkpoint, and size gauges run every `DAEMON_MAINTENANCE_INTERVAL_SECONDS` without blocking decisions.
+- Operator CLI + Makefile shortcuts: `polymarket-ai-agent maintenance [--vacuum]`, `backup <dest>`, `heartbeat`.
+- `PortfolioEngine.prune_history`, `vacuum`, `wal_checkpoint`, `backup` (VACUUM INTO), and `row_counts` + `Journal.vacuum` / `db_size_bytes` / `events_jsonl_size_bytes` back the above.
+- [docs/DEPLOYMENT.md](DEPLOYMENT.md) ships systemd units for the daemon and a nightly `VACUUM INTO` + rsync backup timer, a `logrotate` rule for events.jsonl, and a kill-switch alerting guide tied to `/api/healthz` and `polymarket_agent_safety_stop_triggered`.
+
+**Tests landing with the phase:** `tests/test_maintenance.py`, `tests/test_heartbeat.py`, `tests/test_api_metrics.py`, expanded `tests/test_daemon.py` for the heartbeat loop + kill-switch gating. Full suite at 244 green.
 
 ### Phase 6 — Front-end + operator UX upgrades (optional)
 - SSE-driven dashboard with per-family panels.
@@ -223,13 +228,18 @@ audit we did before Phase 5.
 
 Covered in Phase 4: WAL, indexes, bounded `events.jsonl` reads, auto-prune, indexes on reports(created_at).
 
-Still open (explicit Phase 5 work):
-- retention / archival job for `order_attempts` and terminal `live_orders` rows (`delete where recorded_at < :cutoff`).
-- periodic `VACUUM` or `VACUUM INTO` for long-lived deployments.
-- off-host backup (`VACUUM INTO` + rsync / S3 put nightly).
-- `asyncio.to_thread` around portfolio writes in the daemon hot path.
-- WAL checkpoint loop and size alerting.
-- structured metric for DB size and events.jsonl size exposed on `/api/metrics`.
+Covered in Phase 5:
+- `PortfolioEngine.prune_history(max_age_days)` drops old `order_attempts`, closed `positions`, and terminal `live_orders` rows; the daemon runs it every `DAEMON_MAINTENANCE_INTERVAL_SECONDS` (default 1 hour).
+- `PortfolioEngine.vacuum` + `Journal.vacuum` do a full VACUUM + `pragma wal_checkpoint(TRUNCATE)`; the maintenance loop always runs a WAL checkpoint, and `make maintenance-vacuum` + the weekly `systemd` timer in `docs/DEPLOYMENT.md` handle the heavier pass.
+- `PortfolioEngine.backup(destination)` writes a standalone compacted database via `VACUUM INTO`; the CLI command `polymarket-ai-agent backup <dir>` timestamps each snapshot and is driven by a nightly `systemd` timer that rsyncs off-host.
+- `/api/metrics` exposes `polymarket_agent_db_size_bytes`, `polymarket_agent_events_jsonl_size_bytes`, per-table row counts, exposure gauges, and the daemon's heartbeat counters in both JSON and Prometheus text.
+- `/api/healthz` surfaces heartbeat freshness, auth readiness, DB access, and the kill-switch reason so uptime monitors can alert without scraping Prometheus.
+- WAL checkpoint loop runs every maintenance tick and reports `(busy, log_pages, checkpointed_pages)` through the metrics.
+
+Still open (candidates for a future phase):
+- `asyncio.to_thread` around portfolio writes in the daemon hot path if/when trading is wired into the decision callback; Phase 5 did it for heartbeat + maintenance runs only.
+- PostgreSQL migration if multi-node operation is ever required.
+- On-chain fill verification beyond what `py-clob-client` returns.
 
 ## Out of Scope
 

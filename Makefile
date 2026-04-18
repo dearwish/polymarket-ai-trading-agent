@@ -119,6 +119,22 @@ daemon: install
 daemon-smoke: install
 	$(CLI) daemon --duration-seconds 15
 
+maintenance: install
+	$(CLI) maintenance
+
+maintenance-vacuum: install
+	$(CLI) maintenance --vacuum
+
+backup: install
+	@if [ -z "$(DEST)" ]; then \
+		echo "DEST is required. Usage: make backup DEST=data/backups/agent.db"; \
+		exit 1; \
+	fi
+	$(CLI) backup $(DEST)
+
+heartbeat: install
+	$(CLI) heartbeat
+
 help:
 	@printf '%s\n' \
 		'Available targets:' \
