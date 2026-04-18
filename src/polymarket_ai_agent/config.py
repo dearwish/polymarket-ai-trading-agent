@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # Positions are recorded in the portfolio so the dashboard / report paths
     # fill in without any separate CLI invocation. Safe by default (opt-in).
     daemon_auto_paper_execute: bool = False
+    # Exit thresholds for open paper positions, evaluated on every tick.
+    # Expressed as a fraction of the committed size_usd:
+    #   paper_take_profit_pct = 0.20 → close when unrealised PnL ≥ +20%
+    #   paper_stop_loss_pct   = 0.25 → close when unrealised PnL ≤ −25%
+    # Set to 0.0 to disable (default): positions then hold until the TTE exit
+    # buffer kicks in right before market resolution.
+    paper_take_profit_pct: float = 0.0
+    paper_stop_loss_pct: float = 0.0
     polymarket_private_key: str = ""
     polymarket_funder: str = ""
     polymarket_signature_type: int = 0
@@ -154,6 +162,22 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 10000,
         "step": 0.1,
+        "group": "paper",
+    },
+    "paper_take_profit_pct": {
+        "label": "Paper Take Profit %",
+        "type": "number",
+        "min": 0,
+        "max": 1,
+        "step": 0.01,
+        "group": "paper",
+    },
+    "paper_stop_loss_pct": {
+        "label": "Paper Stop Loss %",
+        "type": "number",
+        "min": 0,
+        "max": 1,
+        "step": 0.01,
         "group": "paper",
     },
 }

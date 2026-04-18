@@ -438,19 +438,38 @@ class DaemonRunner:
         if orderbook is None:
             return  # No usable book yet — skip this tick.
 
-        # Close an already-open position if we're inside the exit window.
+        # Manage an already-open position: take-profit / stop-loss / TTE-exit.
+        # TP and SL fire first so we don't give back profits (or eat full drawdown)
+        # just because TTE hasn't reached the exit buffer yet.
         open_pos = await asyncio.to_thread(self.service.portfolio.get_open_position, market_id)
         if open_pos is not None:
-            exit_buffer = self.service.risk.exit_buffer_seconds_for_tte(tte_seconds)
-            if tte_seconds <= exit_buffer:
-                exit_price = features.mid_yes if open_pos.side == SuggestedSide.YES else features.mid_no
-                if exit_price > 0.0:
+            current_price = features.mid_yes if open_pos.side == SuggestedSide.YES else features.mid_no
+            entry_price = float(open_pos.entry_price)
+            if current_price > 0.0 and entry_price > 0.0:
+                pnl_pct = (current_price - entry_price) / entry_price
+                tp_pct = float(self.settings.paper_take_profit_pct)
+                sl_pct = float(self.settings.paper_stop_loss_pct)
+                close_reason: str | None = None
+                if tp_pct > 0.0 and pnl_pct >= tp_pct:
+                    close_reason = "paper_take_profit"
+                elif sl_pct > 0.0 and pnl_pct <= -sl_pct:
+                    close_reason = "paper_stop_loss"
+                if close_reason is not None:
                     await asyncio.to_thread(
                         self.service.portfolio.close_position,
                         market_id,
-                        float(exit_price),
-                        "paper_tte_exit",
+                        float(current_price),
+                        close_reason,
                     )
+                    return
+            exit_buffer = self.service.risk.exit_buffer_seconds_for_tte(tte_seconds)
+            if tte_seconds <= exit_buffer and current_price > 0.0:
+                await asyncio.to_thread(
+                    self.service.portfolio.close_position,
+                    market_id,
+                    float(current_price),
+                    "paper_tte_exit",
+                )
             return  # Do not open a duplicate while a position is live.
 
         snapshot = MarketSnapshot(

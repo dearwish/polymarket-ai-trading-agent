@@ -394,6 +394,117 @@ def test_daemon_paper_execute_callback_opens_and_closes_position(tmp_path: Path)
     assert closed[0].close_reason == "paper_tte_exit"
 
 
+def _setup_runner_with_open_yes_position(tmp_path, entry_price: float, settings_overrides: dict):
+    """Shared setup for TP / SL tests: opens a YES position at entry_price."""
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.btc_state import BtcSnapshot
+    from polymarket_ai_agent.engine.market_state import MarketState
+    from polymarket_ai_agent.types import MarketAssessment, SuggestedSide
+
+    base_overrides = {
+        "daemon_auto_paper_execute": True,
+        "max_position_usd": 10.0,
+        "min_confidence": 0.0,
+        "min_edge": 0.0,
+        "max_spread": 0.20,
+        "min_depth_usd": 0.0,
+        "stale_data_seconds": 3600,
+        "max_concurrent_positions": 5,
+    }
+    base_overrides.update(settings_overrides)
+    settings = _settings(tmp_path).model_copy(update=base_overrides)
+    service = AgentService(settings)
+    candidate = _candidate("tp-mkt", "yes-tok", "no-tok")
+    runner = DaemonRunner(
+        settings=settings,
+        service=service,
+        config=DaemonConfig(market_family=settings.market_family),
+        market_stream_factory=lambda url: FakeMarketStream([]),  # type: ignore[arg-type]
+        btc_feed_factory=lambda: FakeBtcFeed([]),  # type: ignore[arg-type]
+    )
+    state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    # Entry book centered on entry_price with tight spread.
+    state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": str(entry_price - 0.01), "size": "500"}],
+        "asks": [{"price": str(entry_price + 0.01), "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state
+    runner._candidates[candidate.market_id] = candidate
+    approved = MarketAssessment(
+        market_id=candidate.market_id, fair_probability=0.60, confidence=0.80,
+        suggested_side=SuggestedSide.YES, expiry_risk="LOW",
+        reasons_for_trade=["edge > threshold"], reasons_to_abstain=[],
+        edge=0.15, raw_model_output="unit-test",
+        edge_yes=0.15, edge_no=-0.17, fair_probability_no=0.40, slippage_bps=10.0,
+    )
+    btc = BtcSnapshot(
+        price=70000.0, observed_at=datetime.now(timezone.utc),
+        log_return_10s=0.0, log_return_1m=0.0, log_return_5m=0.0, log_return_15m=0.0,
+        realized_vol_30m=0.01, sample_count=50,
+    )
+    features = state.features()
+    open_ctx = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=features, btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(open_ctx))
+    assert len(service.portfolio.list_open_positions()) == 1
+    return runner, service, candidate, approved, btc
+
+
+def test_paper_take_profit_closes_position_when_mid_rises(tmp_path) -> None:
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    runner, service, candidate, approved, btc = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50, settings_overrides={"paper_take_profit_pct": 0.20},
+    )
+    # Move mid up ~25% to trigger take-profit (threshold is +20%).
+    new_state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    new_state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.62", "size": "500"}],
+        "asks": [{"price": "0.64", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = new_state
+    tp_ctx = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=new_state.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(tp_ctx))
+    assert service.portfolio.list_open_positions() == []
+    closed = service.portfolio.list_closed_positions(limit=1)
+    assert closed[0].close_reason == "paper_take_profit"
+    assert closed[0].realized_pnl > 0
+
+
+def test_paper_stop_loss_closes_position_when_mid_drops(tmp_path) -> None:
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    runner, service, candidate, approved, btc = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50, settings_overrides={"paper_stop_loss_pct": 0.15},
+    )
+    # Drop mid ~20% to trigger stop-loss (threshold is −15%).
+    new_state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    new_state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.39", "size": "500"}],
+        "asks": [{"price": "0.41", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = new_state
+    sl_ctx = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=new_state.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(sl_ctx))
+    assert service.portfolio.list_open_positions() == []
+    closed = service.portfolio.list_closed_positions(limit=1)
+    assert closed[0].close_reason == "paper_stop_loss"
+    assert closed[0].realized_pnl < 0
+
+
 def test_agent_service_attributes_available() -> None:
     # Sanity: the real AgentService exposes `journal` + `discover_markets`, so the
     # daemon's expectations on the service API stay coupled to the production type.
