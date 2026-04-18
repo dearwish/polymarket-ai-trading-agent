@@ -52,9 +52,15 @@ class AgentService:
 
     def discover_markets(self):
         markets = self.polymarket.discover_markets()
-        # Drop markets that have already expired or have no remaining time.
-        # Polymarket's closed=false filter lags behind resolution; guard here.
-        min_tte = 300  # 5 minutes — no point subscribing to nearly-dead markets
+        # Polymarket's closed=false filter lags behind resolution; guard per family.
+        # Floor must be < family lifetime so 5m/15m markets aren't filtered entirely.
+        family_min_tte = {
+            "btc_5m": 30,
+            "btc_15m": 60,
+            "btc_1h": 120,
+            "btc_daily_threshold": 300,
+        }
+        min_tte = family_min_tte.get(self.settings.market_family, 300)
         active = [
             m for m in markets
             if self.polymarket.estimate_seconds_to_expiry(m.end_date_iso) >= min_tte

@@ -108,6 +108,8 @@ class StubService:
             return [
                 {"event_type": "simulation_cycle", "logged_at": "2026-04-17T00:00:00+00:00", "payload": {"market_id": "123"}},
                 {"event_type": "market_assessment", "logged_at": "2026-04-17T00:01:00+00:00", "payload": {"market_id": "123"}},
+                {"event_type": "daemon_tick", "logged_at": "2026-04-17T00:02:00+00:00", "payload": {"market_id": "123", "suggested_side": "YES", "edge_yes": 0.02}},
+                {"event_type": "daemon_tick", "logged_at": "2026-04-17T00:03:00+00:00", "payload": {"market_id": "456", "suggested_side": "NO", "edge_no": 0.03}},
             ]
 
     journal = Journal()
@@ -244,7 +246,7 @@ def test_api_recent_decisions() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["count"] == 2
-    assert payload["decisions"][0]["event_type"] == "simulation_cycle"
+    assert payload["decisions"][0]["event_type"] == "daemon_tick"
 
 
 def test_api_live_orders() -> None:
@@ -306,7 +308,7 @@ def test_api_dashboard_snapshot() -> None:
     assert payload["auth"]["readonly_ready"] is True
     assert "settings" in payload
     assert payload["live_activity"]["market_id"] == "active-123"
-    assert payload["recent_events"]["count"] == 2
+    assert payload["recent_events"]["count"] == 4
 
 
 def test_api_dashboard_handles_missing_active_market() -> None:

@@ -23,19 +23,6 @@ from polymarket_ai_agent.config import (
 from polymarket_ai_agent.service import AgentService
 
 
-_SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
-
-
-def _cached(key: str, ttl: float, fn: Callable[[], Any]) -> Any:
-    """Return a cached result; re-invoke fn when the entry is older than ttl seconds."""
-    entry = _SNAPSHOT_CACHE.get(key)
-    if entry and (time.monotonic() - entry[0]) < ttl:
-        return entry[1]
-    result = fn()
-    _SNAPSHOT_CACHE[key] = (time.monotonic(), result)
-    return result
-
-
 def get_service() -> AgentService:
     return AgentService(get_effective_settings())
 
@@ -61,6 +48,16 @@ def create_app(
     settings_factory: Callable[[], Settings] = get_effective_settings,
     base_settings_factory: Callable[[], Settings] = get_settings,
 ) -> FastAPI:
+    snapshot_cache: dict[str, tuple[float, Any]] = {}
+
+    def _cached(key: str, ttl: float, fn: Callable[[], Any]) -> Any:
+        entry = snapshot_cache.get(key)
+        if entry and (time.monotonic() - entry[0]) < ttl:
+            return entry[1]
+        result = fn()
+        snapshot_cache[key] = (time.monotonic(), result)
+        return result
+
     app = FastAPI(
         title="Polymarket AI Agent API",
         version="0.1.0",
