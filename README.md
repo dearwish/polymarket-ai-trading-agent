@@ -27,6 +27,8 @@ The repository includes a working paper and read-only live-readiness stack, plus
 - **per-family risk profiles** (btc_1h / btc_15m / btc_5m) with tighter stale-data ceilings, a dynamic exit buffer scaled against the family's candle window, a correlation cap on net BTC directional exposure, and `max_concurrent_positions` replacing the single-position rule (Phase 4)
 - **SQLite hygiene** — WAL mode, `synchronous=NORMAL`, explicit indexes on every hot lookup column, bounded `events.jsonl` tail reads, and an auto-prune loop (Phase 4; see the SQLite & Log-Growth Risk section in `docs/ROADMAP.md`)
 - **operational readiness** — daemon heartbeat file, `/api/healthz` + `/api/metrics` (JSON + Prometheus), background retention / WAL-checkpoint / size-gauge maintenance loop, VACUUM INTO backups, kill-switch on auth failure + stale heartbeat, systemd units + nightly backup timer + logrotate in `docs/DEPLOYMENT.md` (Phase 5)
+- **paper soak hardening** — `WS_SSL_VERIFY` setting for proxy/VPN environments; 300-second minimum TTE guard in market discovery (Polymarket's `closed=false` lags behind resolution); `btc_log_return_vs_strike` field in `EvidencePacket` so the quant scorer uses `ln(S/K)` (Black-Scholes distance-to-strike) for threshold markets instead of short-term momentum
+- **soak analysis** — `scripts/analyze_soak.py` correlates `daemon_tick` journal entries against resolved market outcomes and reports hit rate, mean edge captured, abstain rate, and Brier score
 - test suite covering connectors, scoring, risk, execution, service, CLI, state/daemon/feed modules, the execution router and VWAP fills, live fill bridging, the live close flow, per-family risk profiles, btc_15m discovery, journal retention, heartbeats, `/api/metrics`/`/api/healthz`, and daemon kill-switch gating — **244 tests**
 
 Important:
@@ -62,6 +64,7 @@ make simulate-market MARKET_ID=123
 make simulate-loop-active ITERATIONS=3 INTERVAL=0
 make daemon-smoke   # 15s smoke test of the event-driven daemon
 make daemon         # run the event-driven daemon (Ctrl+C to stop)
+make analyze-soak   # analyze daemon_tick journal against resolved market outcomes
 ```
 
 ## Operator Workflow
@@ -169,6 +172,7 @@ The first version is intentionally narrow:
 - [`PLAN.md`](./PLAN.md)
 - [`docs/ROADMAP.md`](./docs/ROADMAP.md)
 - [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
+- [`scripts/analyze_soak.py`](./scripts/analyze_soak.py)
 - [`.gitignore`](./.gitignore)
 
 ## Event-Driven Daemon (Phase 1)
@@ -192,13 +196,15 @@ WS_RECONNECT_BACKOFF_SECONDS=2.0
 WS_RECONNECT_BACKOFF_MAX_SECONDS=30.0
 DAEMON_DISCOVERY_INTERVAL_SECONDS=60
 DAEMON_DECISION_MIN_INTERVAL_SECONDS=1.0
+WS_SSL_VERIFY=true  # set false if a proxy/VPN presents a self-signed cert
 ```
 
 ## Quant Scoring (Phase 2)
 
 `QuantScoringEngine` ([src/polymarket_ai_agent/engine/quant_scoring.py](./src/polymarket_ai_agent/engine/quant_scoring.py)) runs on every daemon tick:
 
-- fair_yes from a drift-less GBM normalised by time-to-expiry, with a damping factor and a linear tilt from top-5 imbalance
+- **for `btc_1h` / up-or-down markets**: drift-less GBM over τ with short-term momentum tilt — `fair_yes = Φ(log_return_5m / σ√τ × damping)` plus top-5 imbalance nudge
+- **for `btc_daily_threshold` / above-$K markets**: Black-Scholes distance-to-strike — `fair_yes = Φ(ln(S/K) / σ√τ × damping)`, where the strike is parsed from the question
 - per-side edge after real cost stack: `edge_yes = fair_yes − ask_yes − slippage − fee_bps`, symmetric for NO
 - confidence scales with edge magnitude and degrades when slippage is high
 - expiry-risk tiers configurable via `QUANT_HIGH_EXPIRY_RISK_SECONDS` / `QUANT_MEDIUM_EXPIRY_RISK_SECONDS`

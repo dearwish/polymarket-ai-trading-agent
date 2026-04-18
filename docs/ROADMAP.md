@@ -265,3 +265,17 @@ Still open (candidates for a future phase):
 1. Wire up Polymarket + BTC websockets + asyncio daemon (Phase 1).
 2. Correct per-side edge formula with quant fair value (Phase 2).
 3. SELL + cancel/replace + live-fill → position bridge (Phase 3).
+
+---
+
+## Paper Soak — Findings (April 2026)
+
+First live paper soak run on `btc_daily_threshold` markets ("will BTC be above $X on April 18?"). Three issues found and fixed during soak startup:
+
+1. **WS SSL failure** — Both Binance and Polymarket websocket connections silently failed due to a self-signed certificate in the TLS chain (proxy/VPN). Added `WS_SSL_VERIFY` setting (default `true`; set `false` in `.env` for affected environments). Binance WS now delivers ~54 ticks/sec; Polymarket WS ~14 events/sec across subscribed markets.
+
+2. **Expired market discovery** — Polymarket's `closed=false` API filter lags behind on-chain resolution. The daemon was subscribing to already-expired markets. Added a 300-second minimum TTE guard in `service.discover_markets`.
+
+3. **Wrong quant model for threshold markets** — For "above $K" markets the scorer was computing `Φ(log_return_5m / σ√τ)` (short-term momentum) instead of `Φ(ln(S/K) / σ√τ)` (Black-Scholes distance-to-strike). With BTC at $77,122 and K=$76,000, the old model returned 43% fair_yes; the corrected model returns 99%. Added `btc_log_return_vs_strike` field to `EvidencePacket`; `ResearchEngine` parses the dollar strike from the question; `QuantScoringEngine` uses it when present.
+
+Run `make analyze-soak` after markets close to evaluate hit rate and model calibration against resolved outcomes.
