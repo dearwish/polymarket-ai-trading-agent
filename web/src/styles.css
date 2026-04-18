@@ -623,6 +623,36 @@ th {
   letter-spacing: 0.05em;
 }
 
+.info-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.info-bar .pill {
+  padding: 8px 12px;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.info-bar .pill.positive {
+  color: var(--accent);
+}
+
+.info-bar .pill.negative {
+  color: var(--danger);
+}
+
+.info-bar-label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-right: 6px;
+}
+
 .accordion-stack {
   display: grid;
   gap: 14px;

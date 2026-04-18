@@ -1199,6 +1199,33 @@ function heartbeatAgeClass(age: number | null): string {
   return "pill blocked";
 }
 
+type InfoBarItem = { label: string; value: string | number; tone?: "muted" | "positive" | "negative" | "ready" | "blocked" };
+
+function InfoBar({ heartbeat, items }: { heartbeat: DaemonHeartbeatPayload | null; items: InfoBarItem[] }) {
+  const hb = heartbeat?.heartbeat ?? null;
+  const age = heartbeat?.age_seconds ?? null;
+  return (
+    <div className="info-bar">
+      <span className="pill">
+        <span className="info-bar-label">BTC</span>
+        {formatMoney(hb?.btc_last_price)}
+      </span>
+      {heartbeat !== null && (
+        <span className={heartbeatAgeClass(age)}>
+          <span className="info-bar-label">HB</span>
+          {age !== null ? `${age.toFixed(1)}s ago` : "absent"}
+        </span>
+      )}
+      {items.map((item) => (
+        <span key={item.label} className={item.tone ? `pill ${item.tone}` : "pill"}>
+          <span className="info-bar-label">{item.label}</span>
+          {item.value}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function DaemonView({ heartbeat, ticks }: { heartbeat: DaemonHeartbeatPayload | null; ticks: DaemonTickPayload[] }) {
   const hb = heartbeat?.heartbeat ?? null;
   const age = heartbeat?.age_seconds ?? null;
@@ -1455,6 +1482,50 @@ export default function App() {
     };
   }, []);
 
+  const infoBarItems = useMemo<InfoBarItem[]>(() => {
+    switch (activeView) {
+      case "overview":
+        return [
+          { label: "Positions", value: state.portfolioSummary?.open_positions ?? 0 },
+          { label: "Exposure", value: formatMoney(state.portfolioSummary?.open_position_notional) },
+          { label: "Daily PnL", value: formatMoney(state.portfolioSummary?.daily_realized_pnl), tone: (state.portfolioSummary?.daily_realized_pnl ?? 0) >= 0 ? "positive" : "negative" },
+          { label: "Balance", value: formatMoney(state.status?.available_usd) },
+        ];
+      case "decisions":
+        return [
+          { label: "Signals", value: state.recentDecisions.length },
+          { label: "Markets", value: new Set(state.recentDecisions.map((d) => String(d.payload.market_id ?? ""))).size },
+        ];
+      case "orders":
+        return [
+          { label: "Live orders", value: state.liveOrders.length },
+          { label: "Live trades", value: state.liveTrades.length },
+          { label: "Paper execs", value: state.paperActivity.length },
+        ];
+      case "portfolio": {
+        const pnl = state.portfolioSummary?.total_realized_pnl ?? 0;
+        return [
+          { label: "Open", value: state.portfolioSummary?.open_positions ?? 0 },
+          { label: "Closed", value: state.portfolioSummary?.closed_positions ?? 0 },
+          { label: "Exposure", value: formatMoney(state.portfolioSummary?.open_position_notional) },
+          { label: "Total PnL", value: formatMoney(pnl), tone: pnl >= 0 ? "positive" : "negative" },
+        ];
+      }
+      case "events":
+        return [
+          { label: "Events", value: state.recentEvents.length },
+          { label: "Types", value: new Set(state.recentEvents.map((e) => e.event_type)).size },
+        ];
+      case "settings":
+        return [
+          { label: "Fields", value: Object.keys(state.settings?.fields ?? {}).length },
+          { label: "Overrides", value: Object.keys(state.settings?.overrides ?? {}).length },
+        ];
+      default:
+        return [];
+    }
+  }, [activeView, state]);
+
   const currentView = useMemo(() => {
     switch (activeView) {
       case "decisions":
@@ -1524,6 +1595,7 @@ export default function App() {
       {loading && <div className="banner">Loading dashboard...</div>}
       {error && <div className="banner error">{error}</div>}
 
+      {activeView !== "daemon" && <InfoBar heartbeat={state.daemonHeartbeat} items={infoBarItems} />}
       {currentView}
     </div>
   );
