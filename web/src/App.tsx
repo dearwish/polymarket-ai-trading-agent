@@ -729,30 +729,34 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity }: { l
           <span>{liveActivity?.market_id || "n/a"}</span>
         </div>
         <div className="detail-drawer-grid">
+          {selectedOrder?.order_id && (
+            <div>
+              <label>Selected Order</label>
+              <strong>{selectedOrder.order_id}</strong>
+              <p className="detail-copy">
+                status={selectedOrder.status || "n/a"} | side={selectedOrder.side || "n/a"} | market={selectedOrder.market_id || "n/a"}
+              </p>
+              <p className="detail-copy">
+                price={selectedOrder.price ?? "n/a"} | size={selectedOrder.size ?? "n/a"} | matched={selectedOrder.size_matched ?? "n/a"}
+              </p>
+              <p className="detail-copy">created={selectedOrder.created_at || "n/a"} | asset={selectedOrder.asset_id || "n/a"}</p>
+            </div>
+          )}
+          {selectedTrade?.trade_id && (
+            <div>
+              <label>Selected Trade</label>
+              <strong>{selectedTrade.trade_id}</strong>
+              <p className="detail-copy">
+                status={selectedTrade.status || "n/a"} | side={selectedTrade.side || "n/a"} | market={selectedTrade.market_id || "n/a"}
+              </p>
+              <p className="detail-copy">
+                price={selectedTrade.price ?? "n/a"} | size={selectedTrade.size ?? "n/a"} | amount={selectedTrade.amount ?? "n/a"}
+              </p>
+              <p className="detail-copy">created={selectedTrade.created_at || "n/a"} | asset={selectedTrade.asset_id || "n/a"}</p>
+            </div>
+          )}
           <div>
-            <label>Selected Order</label>
-            <strong>{selectedOrder?.order_id || "n/a"}</strong>
-            <p className="detail-copy">
-              status={selectedOrder?.status || "n/a"} | side={selectedOrder?.side || "n/a"} | market={selectedOrder?.market_id || "n/a"}
-            </p>
-            <p className="detail-copy">
-              price={selectedOrder?.price ?? "n/a"} | size={selectedOrder?.size ?? "n/a"} | matched={selectedOrder?.size_matched ?? "n/a"}
-            </p>
-            <p className="detail-copy">created={selectedOrder?.created_at || "n/a"} | asset={selectedOrder?.asset_id || "n/a"}</p>
-          </div>
-          <div>
-            <label>Selected Trade</label>
-            <strong>{selectedTrade?.trade_id || "n/a"}</strong>
-            <p className="detail-copy">
-              status={selectedTrade?.status || "n/a"} | side={selectedTrade?.side || "n/a"} | market={selectedTrade?.market_id || "n/a"}
-            </p>
-            <p className="detail-copy">
-              price={selectedTrade?.price ?? "n/a"} | size={selectedTrade?.size ?? "n/a"} | amount={selectedTrade?.amount ?? "n/a"}
-            </p>
-            <p className="detail-copy">created={selectedTrade?.created_at || "n/a"} | asset={selectedTrade?.asset_id || "n/a"}</p>
-          </div>
-          <div>
-            <label>Live Preflight</label>
+            <label>Live Readiness</label>
             <strong>{liveActivity?.preflight?.market?.question || "n/a"}</strong>
             <p className="detail-copy">blockers={liveActivity?.preflight?.blockers?.join(", ") || "none"}</p>
             <p className="detail-copy">
