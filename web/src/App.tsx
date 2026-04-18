@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "settings";
+type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "settings" | "daemon";
 
 type StatusPayload = {
   trading_mode: string;
@@ -163,6 +163,45 @@ type LiveTradesPayload = {
   trades: LiveTrade[];
 };
 
+type DaemonHeartbeatPayload = {
+  age_seconds: number | null;
+  heartbeat: {
+    written_at: string;
+    metrics: {
+      started_at: string;
+      active_market_count: number;
+      polymarket_events: number;
+      btc_ticks: number;
+      decision_ticks: number;
+      last_decision_latency_ms: number;
+      safety_stop_reason: string | null;
+      maintenance_runs: number;
+    };
+    btc_last_price: number | null;
+    btc_seconds_since_last_update: number | null;
+    safety_stop_reason: string | null;
+    market_family: string;
+    active_market_ids: string[];
+  } | null;
+};
+
+type DaemonTickPayload = {
+  market_id: string;
+  question: string;
+  seconds_to_expiry: number;
+  bid_yes: number;
+  ask_yes: number;
+  fair_probability: number;
+  fair_probability_no: number;
+  edge_yes: number;
+  edge_no: number;
+  suggested_side: string;
+  confidence: number;
+  btc_price: number | null;
+  btc_realized_vol_30m: number | null;
+  expiry_risk: string;
+};
+
 type SettingsFieldMeta = {
   label: string;
   type: "text" | "number" | "boolean" | "select";
@@ -192,6 +231,8 @@ type DashboardState = {
   recentDecisions: DecisionItem[];
   liveOrders: LiveOrder[];
   liveTrades: LiveTrade[];
+  daemonHeartbeat: DaemonHeartbeatPayload | null;
+  daemonTicks: DaemonTickPayload[];
 };
 
 type DashboardSnapshotPayload = {
@@ -207,6 +248,8 @@ type DashboardSnapshotPayload = {
   recent_decisions: DecisionsPayload;
   live_orders: LiveOrdersPayload;
   live_trades: LiveTradesPayload;
+  daemon_heartbeat: DaemonHeartbeatPayload;
+  daemon_ticks: { ticks: DaemonTickPayload[] };
 };
 
 const VIEWS: Array<{ key: ViewKey; label: string }> = [
@@ -216,6 +259,7 @@ const VIEWS: Array<{ key: ViewKey; label: string }> = [
   { key: "portfolio", label: "Portfolio" },
   { key: "events", label: "Event Log" },
   { key: "settings", label: "Settings" },
+  { key: "daemon", label: "Daemon" },
 ];
 
 async function fetchJson<T>(path: string): Promise<T> {
@@ -301,6 +345,8 @@ function mapSnapshotToState(snapshot: DashboardSnapshotPayload): DashboardState 
     recentDecisions: snapshot.recent_decisions.decisions,
     liveOrders: snapshot.live_orders.orders,
     liveTrades: snapshot.live_trades.trades,
+    daemonHeartbeat: snapshot.daemon_heartbeat ?? null,
+    daemonTicks: snapshot.daemon_ticks?.ticks ?? [],
   };
 }
 
@@ -330,6 +376,10 @@ function applyDashboardDelta(current: DashboardState, eventName: string, payload
       return { ...current, liveOrders: (payload as LiveOrdersPayload).orders };
     case "live_trades":
       return { ...current, liveTrades: (payload as LiveTradesPayload).trades };
+    case "daemon_heartbeat":
+      return { ...current, daemonHeartbeat: payload as DaemonHeartbeatPayload };
+    case "daemon_ticks":
+      return { ...current, daemonTicks: (payload as { ticks: DaemonTickPayload[] }).ticks };
     default:
       return current;
   }
@@ -863,6 +913,41 @@ function SettingsPage({
           </button>
           {saveMessage && <span className="inline-message">{saveMessage}</span>}
         </div>
+
+        <div style={{ marginTop: "24px" }}>
+          <div className="panel-header">
+            <h2>Per-Family Risk Profiles (read-only)</h2>
+            <span>From config defaults</span>
+          </div>
+          <div className="table-wrap">
+            <table className="risk-table">
+              <thead>
+                <tr>
+                  <th>Family</th>
+                  <th>Stale Data (s)</th>
+                  <th>Exit Buffer %</th>
+                  <th>Max Concurrent</th>
+                  <th>Max Net BTC Exp (USD)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { family: "btc_1h", stale_data_seconds: 5, exit_buffer_pct_of_tte: 0.05, max_concurrent_positions: 2 },
+                  { family: "btc_15m", stale_data_seconds: 3, exit_buffer_pct_of_tte: 0.07, max_concurrent_positions: 2 },
+                  { family: "btc_5m", stale_data_seconds: 2, exit_buffer_pct_of_tte: 0.10, max_concurrent_positions: 1 },
+                ].map((row) => (
+                  <tr key={row.family}>
+                    <td>{row.family}</td>
+                    <td>{row.stale_data_seconds}</td>
+                    <td>{(row.exit_buffer_pct_of_tte * 100).toFixed(0)}%</td>
+                    <td>{row.max_concurrent_positions}</td>
+                    <td>{formatMoney(settings.values["max_net_btc_exposure_usd"] as number | null)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </article>
 
       <article className="panel">
@@ -932,6 +1017,129 @@ function SettingsPage({
   );
 }
 
+function heartbeatAgeClass(age: number | null): string {
+  if (age === null) return "pill blocked";
+  if (age < 15) return "pill ready";
+  if (age < 60) return "pill stream-connecting";
+  return "pill blocked";
+}
+
+function DaemonView({ heartbeat, ticks }: { heartbeat: DaemonHeartbeatPayload | null; ticks: DaemonTickPayload[] }) {
+  const hb = heartbeat?.heartbeat ?? null;
+  const age = heartbeat?.age_seconds ?? null;
+  const metrics = hb?.metrics ?? null;
+  const daemonRunning = age !== null && age < 60;
+
+  return (
+    <>
+      {!daemonRunning && (
+        <div className="banner error">Daemon not running — heartbeat is absent or stale.</div>
+      )}
+
+      <div className="daemon-header">
+        <span className="pill">
+          BTC: {hb?.btc_last_price != null ? `$${hb.btc_last_price.toLocaleString()}` : "n/a"}
+        </span>
+        <span className={heartbeatAgeClass(age)}>
+          Heartbeat: {age !== null ? `${age.toFixed(1)}s ago` : "absent"}
+        </span>
+        <span className={hb?.safety_stop_reason ? "pill blocked" : "pill ready"}>
+          Safety stop: {hb?.safety_stop_reason ?? "None"}
+        </span>
+        <span className="pill">
+          Active markets: {metrics?.active_market_count ?? 0}
+        </span>
+        <span className="pill">
+          Family: {hb?.market_family ?? "n/a"}
+        </span>
+      </div>
+
+      <div className="daemon-stat-grid">
+        <article className="card">
+          <h2>Polymarket Events</h2>
+          <strong style={{ fontSize: "28px" }}>{metrics?.polymarket_events?.toLocaleString() ?? "0"}</strong>
+        </article>
+        <article className="card">
+          <h2>BTC Ticks</h2>
+          <strong style={{ fontSize: "28px" }}>{metrics?.btc_ticks?.toLocaleString() ?? "0"}</strong>
+        </article>
+        <article className="card">
+          <h2>Decision Ticks</h2>
+          <strong style={{ fontSize: "28px" }}>{metrics?.decision_ticks?.toLocaleString() ?? "0"}</strong>
+        </article>
+        <article className="card">
+          <h2>Last Latency</h2>
+          <strong style={{ fontSize: "28px" }}>
+            {metrics?.last_decision_latency_ms != null ? `${metrics.last_decision_latency_ms.toFixed(2)} ms` : "n/a"}
+          </strong>
+        </article>
+      </div>
+
+      {ticks.length === 0 ? (
+        <div className="empty-state">No daemon tick data — daemon may not be running or no markets are active.</div>
+      ) : (
+        <div className="daemon-market-grid">
+          {ticks.map((tick) => {
+            const fairYes = tick.fair_probability ?? 0;
+            const fairNo = tick.fair_probability_no ?? (1 - fairYes);
+            const tte = tick.seconds_to_expiry != null ? Math.round(tick.seconds_to_expiry / 60) : null;
+            const sideClass =
+              tick.suggested_side === "YES" ? "side-yes" :
+              tick.suggested_side === "NO" ? "side-no" : "side-abstain";
+            return (
+              <div key={tick.market_id} className="daemon-market-card">
+                <div style={{ marginBottom: "10px", fontWeight: 600, fontSize: "14px" }}>
+                  {tick.question ? (tick.question.length > 55 ? `${tick.question.slice(0, 55)}...` : tick.question) : tick.market_id}
+                </div>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px", fontSize: "12px", color: "var(--muted)" }}>
+                  <span>TTE: {tte !== null ? `${tte}m` : "n/a"}</span>
+                  <span>Bid: {tick.bid_yes?.toFixed(3) ?? "n/a"}</span>
+                  <span>Ask: {tick.ask_yes?.toFixed(3) ?? "n/a"}</span>
+                </div>
+
+                <div style={{ marginBottom: "8px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", color: "var(--muted)", marginBottom: "4px" }}>
+                    <span>YES {(fairYes * 100).toFixed(1)}%</span>
+                    <span>NO {(fairNo * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="prob-bar">
+                    <div style={{ width: `${fairYes * 100}%` }} />
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", fontSize: "13px", marginBottom: "10px" }}>
+                  <div>
+                    Edge YES: <span className={tick.edge_yes > 0 ? "edge-positive" : "edge-negative"}>
+                      {tick.edge_yes != null ? (tick.edge_yes * 100).toFixed(2) : "n/a"}%
+                    </span>
+                  </div>
+                  <div>
+                    Edge NO: <span className={tick.edge_no > 0 ? "edge-positive" : "edge-negative"}>
+                      {tick.edge_no != null ? (tick.edge_no * 100).toFixed(2) : "n/a"}%
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                  <span className={sideClass}>{tick.suggested_side}</span>
+                  <span style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Confidence: {tick.confidence != null ? `${(tick.confidence * 100).toFixed(0)}%` : "n/a"}
+                  </span>
+                  {tick.expiry_risk && (
+                    <span className={`side-${tick.expiry_risk === "high" ? "no" : tick.expiry_risk === "medium" ? "abstain" : "yes"}`}>
+                      {tick.expiry_risk} expiry risk
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function App() {
   const [activeView, setActiveView] = useState<ViewKey>(getInitialView);
   const [streamStatus, setStreamStatus] = useState<"connecting" | "connected" | "reconnecting" | "disconnected">("connecting");
@@ -948,6 +1156,8 @@ export default function App() {
     recentDecisions: [],
     liveOrders: [],
     liveTrades: [],
+    daemonHeartbeat: null,
+    daemonTicks: [],
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -992,6 +1202,8 @@ export default function App() {
       "recent_decisions",
       "live_orders",
       "live_trades",
+      "daemon_heartbeat",
+      "daemon_ticks",
     ];
 
     const connect = () => {
@@ -1056,6 +1268,8 @@ export default function App() {
             onRefresh={refreshDashboard}
           />
         );
+      case "daemon":
+        return <DaemonView heartbeat={state.daemonHeartbeat} ticks={state.daemonTicks} />;
       case "overview":
       default:
         return <OverviewPage state={state} />;

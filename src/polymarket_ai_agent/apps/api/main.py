@@ -238,6 +238,26 @@ def create_app(
                 "error": str(exc),
             }
 
+    def _daemon_heartbeat_payload(settings: Settings) -> dict:
+        reader = HeartbeatReader(settings.heartbeat_path)
+        return {
+            "age_seconds": reader.age_seconds(),
+            "heartbeat": reader.read(),
+        }
+
+    def _latest_daemon_ticks(service: AgentService) -> dict:
+        events = service.journal.read_recent_events(limit=200)
+        seen: set[str] = set()
+        ticks: list[dict] = []
+        for e in events:
+            if e.get("event_type") != "daemon_tick":
+                continue
+            mid = e.get("payload", {}).get("market_id", "")
+            if mid and mid not in seen:
+                seen.add(mid)
+                ticks.append(e.get("payload", {}))
+        return {"ticks": ticks}
+
     def build_dashboard_snapshot(service: AgentService) -> dict:
         return {
             "status": service.status(),
@@ -252,6 +272,8 @@ def create_app(
             "recent_decisions": recent_decisions(limit=20, service=service),
             "live_orders": live_orders(service=service),
             "live_trades": live_trades(limit=20, service=service),
+            "daemon_heartbeat": _daemon_heartbeat_payload(service.settings),
+            "daemon_ticks": _latest_daemon_ticks(service),
         }
 
     def streamable_dashboard_sections(service: AgentService) -> dict:
@@ -269,6 +291,8 @@ def create_app(
             "recent_decisions": snapshot["recent_decisions"],
             "live_orders": snapshot["live_orders"],
             "live_trades": snapshot["live_trades"],
+            "daemon_heartbeat": snapshot["daemon_heartbeat"],
+            "daemon_ticks": snapshot["daemon_ticks"],
         }
 
     @app.get("/api/status")
@@ -542,6 +566,10 @@ def create_app(
     ) -> dict:
         resolved_market_id = resolve_active_market_id(service, body.market_id, body.active)
         return service.live_reconcile(resolved_market_id or None)
+
+    @app.get("/api/daemon/heartbeat")
+    def daemon_heartbeat(settings: Settings = Depends(settings_factory)) -> dict:
+        return _daemon_heartbeat_payload(settings)
 
     @app.post("/api/actions/live-watch")
     async def live_watch_action(
