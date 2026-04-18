@@ -9,8 +9,9 @@ import uvicorn
 from pydantic import BaseModel, Field
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from polymarket_ai_agent.apps.daemon.heartbeat import HeartbeatReader
 from polymarket_ai_agent.config import (
     Settings,
     get_settings,
@@ -65,6 +66,131 @@ def create_app(
     @app.get("/health")
     def health() -> dict:
         return {"ok": True}
+
+    def _collect_metrics(service: AgentService, settings: Settings) -> dict[str, Any]:
+        reader = HeartbeatReader(settings.heartbeat_path)
+        heartbeat = reader.read()
+        heartbeat_age = reader.age_seconds()
+        status_snapshot = service.status()
+        db_size = service.journal.db_size_bytes()
+        events_size = service.journal.events_jsonl_size_bytes()
+        row_counts = service.portfolio.row_counts()
+        exposure = service.portfolio.get_exposure_summary()
+        return {
+            "status": status_snapshot,
+            "heartbeat": heartbeat,
+            "heartbeat_age_seconds": heartbeat_age,
+            "db_size_bytes": db_size,
+            "events_jsonl_size_bytes": events_size,
+            "row_counts": row_counts,
+            "exposure": exposure,
+            "open_positions": status_snapshot.get("open_positions", 0),
+            "safety_stop_reason": status_snapshot.get("safety_stop_reason"),
+            "daily_realized_pnl": status_snapshot.get("daily_realized_pnl", 0.0),
+        }
+
+    def _healthz_payload(service: AgentService, settings: Settings) -> dict[str, Any]:
+        metrics = _collect_metrics(service, settings)
+        heartbeat_age = metrics.get("heartbeat_age_seconds")
+        status_snapshot = metrics["status"]
+        heartbeat_stale = (
+            heartbeat_age is None
+            or heartbeat_age > float(settings.daemon_heartbeat_stale_seconds)
+        )
+        checks = {
+            "db": {"ok": metrics["db_size_bytes"] >= 0},
+            "heartbeat": {
+                "ok": not heartbeat_stale,
+                "age_seconds": heartbeat_age,
+                "stale_threshold_seconds": float(settings.daemon_heartbeat_stale_seconds),
+            },
+            "safety_stop": {
+                "ok": status_snapshot.get("safety_stop_reason") is None,
+                "reason": status_snapshot.get("safety_stop_reason"),
+            },
+            "auth": {
+                "ok": bool(status_snapshot.get("auth", {}).get("readonly_ready", False)),
+                "detail": status_snapshot.get("auth", {}),
+            },
+        }
+        ok = all(check.get("ok", False) for check in checks.values() if check is not None)
+        return {
+            "ok": ok,
+            "checks": checks,
+            "metrics_size": {
+                "db_size_bytes": metrics["db_size_bytes"],
+                "events_jsonl_size_bytes": metrics["events_jsonl_size_bytes"],
+            },
+        }
+
+    def _format_prometheus(metrics: dict[str, Any]) -> str:
+        def line(name: str, value: Any, labels: dict[str, str] | None = None, help_text: str | None = None) -> list[str]:
+            out: list[str] = []
+            if help_text is not None:
+                out.append(f"# HELP {name} {help_text}")
+                out.append(f"# TYPE {name} gauge")
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return []
+            label_str = ""
+            if labels:
+                inner = ",".join(f'{k}="{v}"' for k, v in labels.items())
+                label_str = f"{{{inner}}}"
+            out.append(f"{name}{label_str} {numeric}")
+            return out
+
+        lines: list[str] = []
+        lines.extend(line("polymarket_agent_db_size_bytes", metrics["db_size_bytes"], help_text="SQLite database size on disk in bytes (includes WAL/SHM sidecars)."))
+        lines.extend(line("polymarket_agent_events_jsonl_size_bytes", metrics["events_jsonl_size_bytes"], help_text="events.jsonl size on disk in bytes."))
+        lines.extend(line("polymarket_agent_heartbeat_age_seconds", metrics.get("heartbeat_age_seconds") or -1, help_text="Seconds since the daemon last wrote its heartbeat; -1 if unavailable."))
+        lines.extend(line("polymarket_agent_open_positions", metrics["open_positions"], help_text="Currently open positions."))
+        lines.extend(line("polymarket_agent_daily_realized_pnl_usd", metrics["daily_realized_pnl"], help_text="Realized PnL for the current UTC day in USD."))
+        lines.extend(line("polymarket_agent_long_btc_exposure_usd", metrics["exposure"]["long_btc_usd"], help_text="Notional long-BTC exposure in USD."))
+        lines.extend(line("polymarket_agent_short_btc_exposure_usd", metrics["exposure"]["short_btc_usd"], help_text="Notional short-BTC exposure in USD."))
+        lines.extend(line("polymarket_agent_net_btc_exposure_usd", metrics["exposure"]["net_btc_usd"], help_text="Signed net BTC directional exposure in USD."))
+        for table, value in metrics["row_counts"].items():
+            lines.extend(line("polymarket_agent_db_rows", value, labels={"table": table}, help_text="Row count per SQLite table."))
+        heartbeat = metrics.get("heartbeat") or {}
+        daemon_metrics = (heartbeat or {}).get("metrics") or {}
+        for key in (
+            "polymarket_events",
+            "btc_ticks",
+            "decision_ticks",
+            "discovery_cycles",
+            "discovery_errors",
+            "active_market_count",
+            "last_decision_latency_ms",
+        ):
+            if key in daemon_metrics:
+                lines.extend(
+                    line(
+                        f"polymarket_agent_{key}",
+                        daemon_metrics[key],
+                        help_text=f"Daemon runtime metric: {key} (from heartbeat).",
+                    )
+                )
+        safety = metrics.get("safety_stop_reason")
+        lines.extend(line("polymarket_agent_safety_stop_triggered", 0 if safety is None else 1, help_text="1 if a safety stop has fired, 0 otherwise."))
+        return "\n".join(lines) + "\n"
+
+    @app.get("/api/healthz")
+    def api_healthz(service: AgentService = Depends(service_factory), settings: Settings = Depends(settings_factory)) -> dict:
+        return _healthz_payload(service, settings)
+
+    @app.get("/api/metrics")
+    def api_metrics(
+        service: AgentService = Depends(service_factory),
+        settings: Settings = Depends(settings_factory),
+        format: str = Query("json", pattern="^(json|prometheus)$"),
+    ):
+        metrics = _collect_metrics(service, settings)
+        if format == "prometheus":
+            return PlainTextResponse(
+                content=_format_prometheus(metrics),
+                media_type="text/plain; version=0.0.4",
+            )
+        return metrics
 
     def resolve_active_market_id(service: AgentService, market_id: str | None, active: bool) -> str | None:
         if market_id:
