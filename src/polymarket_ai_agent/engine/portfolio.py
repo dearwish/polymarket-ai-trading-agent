@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,7 +43,7 @@ class PortfolioEngine:
             return {"order_attempts": 0, "positions": 0, "live_orders": 0}
         current = now or _utc_now()
         cutoff = (current - timedelta(days=max_age_days)).isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             order_attempts = conn.execute(
                 "delete from order_attempts where recorded_at < ?",
                 (cutoff,),
@@ -86,7 +87,7 @@ class PortfolioEngine:
         reports from ``pragma wal_checkpoint(TRUNCATE)`` so metrics can
         surface it.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute("pragma wal_checkpoint(TRUNCATE)").fetchone()
         if not row:
             return (0, 0, 0)
@@ -103,7 +104,7 @@ class PortfolioEngine:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             destination.unlink()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             # sqlite3 in Python 3.11+ does not allow parameterised VACUUM INTO,
             # so escape the path quote-quote style and keep the operator-supplied
             # destination separate from user-controlled strings.
@@ -114,7 +115,7 @@ class PortfolioEngine:
     def row_counts(self) -> dict[str, int]:
         """Cheap row counts for the `/api/metrics` gauges."""
         counts = {}
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             for table in ("positions", "order_attempts", "live_orders"):
                 row = conn.execute(f"select count(*) from {table}").fetchone()
                 counts[table] = int(row[0] or 0)
@@ -166,7 +167,7 @@ class PortfolioEngine:
         }
 
     def get_total_realized_pnl(self) -> float:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute(
                 "select coalesce(sum(realized_pnl), 0.0) from positions where status = 'CLOSED'"
             ).fetchone()
@@ -174,7 +175,7 @@ class PortfolioEngine:
 
     def get_daily_realized_pnl(self, now: datetime | None = None) -> float:
         current = now or _utc_now()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute(
                 """
                 select coalesce(sum(realized_pnl), 0.0)
@@ -189,7 +190,7 @@ class PortfolioEngine:
 
     def record_execution(self, decision: TradeDecision, result: ExecutionResult) -> None:
         entry_price = result.fill_price if result.fill_price > 0 else decision.limit_price
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
                 insert into order_attempts(
@@ -279,7 +280,7 @@ class PortfolioEngine:
             return None
         timestamp = filled_at or _utc_now()
         size_usd = round(fill_price * filled_size_shares, 6)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             existing = conn.execute(
                 "select market_id from positions where order_id = ? and status = 'OPEN' limit 1",
                 (order_id,),
@@ -333,7 +334,7 @@ class PortfolioEngine:
 
     def get_rejected_orders(self, now: datetime | None = None) -> int:
         current = now or _utc_now()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute(
                 """
                 select count(*)
@@ -346,7 +347,7 @@ class PortfolioEngine:
         return int(row[0] or 0)
 
     def list_live_orders(self, limit: int = 50) -> list[dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 """
                 select order_id, market_id, asset_id, side, status, detail, created_at, updated_at
@@ -378,7 +379,7 @@ class PortfolioEngine:
 
     def update_live_order(self, order_id: str, status: str, detail: str = "", updated_at: datetime | None = None) -> None:
         current = updated_at or _utc_now()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
                 update live_orders
@@ -394,7 +395,7 @@ class PortfolioEngine:
         return status.strip().upper() in cls.TERMINAL_LIVE_ORDER_STATUSES
 
     def list_open_positions(self) -> list[PositionRecord]:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 """
                 select market_id, side, size_usd, entry_price, order_id, opened_at, status,
@@ -406,7 +407,7 @@ class PortfolioEngine:
         return [self._row_to_position(row) for row in rows]
 
     def list_closed_positions(self, limit: int = 20) -> list[PositionRecord]:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 """
                 select market_id, side, size_usd, entry_price, order_id, opened_at, status,
@@ -436,7 +437,7 @@ class PortfolioEngine:
         if not position:
             return PositionAction(market_id=market_id, action="NOOP", reason="Position not open.")
         pnl = self._compute_pnl(position, exit_price)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
                 update positions
@@ -453,7 +454,7 @@ class PortfolioEngine:
         return PositionAction(market_id=market_id, action="CLOSE", reason=reason)
 
     def _get_open_position(self, market_id: str) -> PositionRecord | None:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute(
                 """
                 select market_id, side, size_usd, entry_price, order_id, opened_at, status,
@@ -499,7 +500,7 @@ class PortfolioEngine:
         )
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             # WAL mode lets the daemon's async writes coexist with operator
             # reads (status/report/dashboard) without blocking. synchronous=NORMAL
             # is a good default for WAL journaling on a single-node trader.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,7 +75,7 @@ class Journal:
             conn.close()
 
     def save_report(self, session_id: str, summary: str) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "insert into reports(session_id, summary, created_at) values (?, ?, ?)",
                 (session_id, summary, self._utc_now_iso()),
@@ -149,14 +150,14 @@ class Journal:
         return lines[-limit:]
 
     def read_reports(self) -> list[tuple[str, str, str]]:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 "select session_id, summary, created_at from reports order by rowid desc limit 20"
             ).fetchall()
         return [(str(row[0]), str(row[1]), str(row[2])) for row in rows]
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("pragma journal_mode = WAL")
             conn.execute("pragma synchronous = NORMAL")
             conn.execute(
