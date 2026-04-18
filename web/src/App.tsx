@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "settings" | "daemon";
 
@@ -229,6 +229,7 @@ type DaemonTickPayload = {
   seconds_to_expiry: number;
   bid_yes: number;
   ask_yes: number;
+  mid_yes?: number;
   fair_probability: number;
   fair_probability_no: number;
   edge_yes: number;
@@ -925,22 +926,45 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                   <th>Market</th>
                   <th>Side</th>
                   <th>Size</th>
-                  <th>Entry Price</th>
+                  <th>Entry</th>
+                  <th>Mark</th>
+                  <th>Unrealized PnL</th>
                   <th>Opened</th>
                   <th>Order ID</th>
                 </tr>
               </thead>
               <tbody>
-                {openPositions.map((position) => (
-                  <tr key={position.order_id || `${position.market_id}-${position.opened_at}`}>
-                    <td><MarketCell marketId={position.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
-                    <td className={position.side === "YES" ? "positive" : position.side === "NO" ? "negative" : ""}>{position.side}</td>
-                    <td>{formatMoney(position.size_usd)}</td>
-                    <td>{position.entry_price.toFixed(4)}</td>
-                    <td style={{ whiteSpace: "nowrap", fontSize: "12px", color: "var(--muted)" }}>{position.opened_at.slice(11, 19)}</td>
-                    <td style={{ fontSize: "12px", color: "var(--muted)" }}>{position.order_id || "n/a"}</td>
-                  </tr>
-                ))}
+                {openPositions.map((position) => {
+                  const tick = marketLookup[position.market_id];
+                  const mark = currentTokenPrice(tick, position.side);
+                  let unrealizedCell: ReactNode;
+                  if (mark !== null && position.entry_price > 0) {
+                    const shares = position.size_usd / position.entry_price;
+                    const pnl = (mark - position.entry_price) * shares;
+                    const pct = (mark - position.entry_price) / position.entry_price;
+                    const cls = pnl >= 0 ? "positive" : "negative";
+                    const sign = pnl >= 0 ? "+" : "";
+                    unrealizedCell = (
+                      <span className={cls}>
+                        {sign}{formatMoney(pnl)} ({sign}{(pct * 100).toFixed(1)}%)
+                      </span>
+                    );
+                  } else {
+                    unrealizedCell = <span style={{ color: "var(--muted)" }}>—</span>;
+                  }
+                  return (
+                    <tr key={position.order_id || `${position.market_id}-${position.opened_at}`}>
+                      <td><MarketCell marketId={position.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
+                      <td className={position.side === "YES" ? "positive" : position.side === "NO" ? "negative" : ""}>{position.side}</td>
+                      <td>{formatMoney(position.size_usd)}</td>
+                      <td>{position.entry_price.toFixed(4)}</td>
+                      <td>{mark !== null ? mark.toFixed(4) : <span style={{ color: "var(--muted)" }}>—</span>}</td>
+                      <td>{unrealizedCell}</td>
+                      <td style={{ whiteSpace: "nowrap", fontSize: "12px", color: "var(--muted)" }}>{position.opened_at.slice(11, 19)}</td>
+                      <td style={{ fontSize: "12px", color: "var(--muted)" }}>{position.order_id || "n/a"}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1274,20 +1298,27 @@ function heartbeatAgeClass(age: number | null): string {
 
 type InfoBarItem = { label: string; value: string | number; tone?: "muted" | "positive" | "negative" | "ready" | "blocked" };
 
-type MarketLookupEntry = { question?: string; slug?: string; end_date_iso?: string };
-type MarketLookup = Record<string, MarketLookupEntry>;
+type MarketLookup = Record<string, DaemonTickPayload>;
 
 function buildMarketLookup(ticks: DaemonTickPayload[]): MarketLookup {
   const lookup: MarketLookup = {};
   for (const tick of ticks) {
     if (!tick.market_id) continue;
-    lookup[tick.market_id] = {
-      question: tick.question,
-      slug: tick.slug,
-      end_date_iso: tick.end_date_iso,
-    };
+    lookup[tick.market_id] = tick;
   }
   return lookup;
+}
+
+/** Current token price in the position's own frame. YES sees mid_yes; NO sees 1-mid_yes. */
+function currentTokenPrice(tick: DaemonTickPayload | undefined, side: string): number | null {
+  if (!tick) return null;
+  const midYes = typeof tick.mid_yes === "number" && tick.mid_yes > 0
+    ? tick.mid_yes
+    : (typeof tick.bid_yes === "number" && typeof tick.ask_yes === "number" && tick.bid_yes > 0 && tick.ask_yes > 0
+      ? (tick.bid_yes + tick.ask_yes) / 2
+      : null);
+  if (midYes === null) return null;
+  return side === "YES" ? midYes : 1 - midYes;
 }
 
 function MarketCell({
