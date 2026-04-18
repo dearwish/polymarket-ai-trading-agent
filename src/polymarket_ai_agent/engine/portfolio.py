@@ -34,13 +34,44 @@ class PortfolioEngine:
         daily_realized_pnl = self.get_daily_realized_pnl(now=now)
         rejected_orders = self.get_rejected_orders(now=now)
         reserved = sum(position.size_usd for position in open_positions)
+        exposure = self._compute_exposure(open_positions)
         return AccountState(
             mode=mode,
             available_usd=self.starting_balance_usd + realized_pnl - reserved,
             open_positions=len(open_positions),
             daily_realized_pnl=daily_realized_pnl,
             rejected_orders=rejected_orders,
+            long_btc_exposure_usd=exposure["long_btc_usd"],
+            short_btc_exposure_usd=exposure["short_btc_usd"],
+            net_btc_exposure_usd=exposure["net_btc_usd"],
+            total_exposure_usd=exposure["total_exposure_usd"],
         )
+
+    def get_exposure_summary(self) -> dict[str, float]:
+        return self._compute_exposure(self.list_open_positions())
+
+    @staticmethod
+    def _compute_exposure(positions: list[PositionRecord]) -> dict[str, float]:
+        """Approximate net BTC directional exposure across open positions.
+
+        We treat YES on a "BTC up or down" market as a long-BTC bet and NO as a
+        short-BTC bet. For threshold markets this is a first-order approximation
+        (e.g. a YES on "BTC above $X" is still directionally long), good enough
+        for a family-level correlation cap.
+        """
+        long_btc = 0.0
+        short_btc = 0.0
+        for position in positions:
+            if position.side == SuggestedSide.YES:
+                long_btc += position.size_usd
+            elif position.side == SuggestedSide.NO:
+                short_btc += position.size_usd
+        return {
+            "long_btc_usd": round(long_btc, 6),
+            "short_btc_usd": round(short_btc, 6),
+            "net_btc_usd": round(long_btc - short_btc, 6),
+            "total_exposure_usd": round(long_btc + short_btc, 6),
+        }
 
     def get_total_realized_pnl(self) -> float:
         with sqlite3.connect(self.db_path) as conn:
@@ -377,6 +408,12 @@ class PortfolioEngine:
 
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
+            # WAL mode lets the daemon's async writes coexist with operator
+            # reads (status/report/dashboard) without blocking. synchronous=NORMAL
+            # is a good default for WAL journaling on a single-node trader.
+            conn.execute("pragma journal_mode = WAL")
+            conn.execute("pragma synchronous = NORMAL")
+            conn.execute("pragma temp_store = MEMORY")
             conn.execute(
                 """
                 create table if not exists positions (
@@ -420,4 +457,13 @@ class PortfolioEngine:
                 )
                 """
             )
+            # Indexes keep hot-path reads O(log n) as the DB grows. All three
+            # tables are append-heavy and queried by status/date or market_id.
+            conn.execute("create index if not exists positions_status_idx on positions(status)")
+            conn.execute("create index if not exists positions_market_status_idx on positions(market_id, status)")
+            conn.execute("create index if not exists positions_closed_at_idx on positions(closed_at)")
+            conn.execute("create index if not exists order_attempts_recorded_at_idx on order_attempts(recorded_at)")
+            conn.execute("create index if not exists order_attempts_market_idx on order_attempts(market_id)")
+            conn.execute("create index if not exists live_orders_status_idx on live_orders(status)")
+            conn.execute("create index if not exists live_orders_updated_at_idx on live_orders(updated_at)")
             conn.commit()

@@ -130,6 +130,10 @@ class AccountState:
     open_positions: int
     daily_realized_pnl: float
     rejected_orders: int = 0
+    long_btc_exposure_usd: float = 0.0
+    short_btc_exposure_usd: float = 0.0
+    net_btc_exposure_usd: float = 0.0
+    total_exposure_usd: float = 0.0
 
 
 @dataclass(slots=True)
