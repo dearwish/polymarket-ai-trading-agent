@@ -130,7 +130,9 @@ Note on btc_15m: the existing code ships family scorers for `btc_1h`, `btc_5m`, 
 
 Each phase is independently shippable and leaves paper mode working.
 
-### Phase 1 — Event-driven market plumbing (foundation)
+**Status:** Phases 1, 2, and 3 have landed on `main`. Phase 4 (per-family risk + correlation-aware portfolio) is next.
+
+### Phase 1 — Event-driven market plumbing (foundation) ✅
 Goal: replace REST polling on the hot path with websocket-driven state.
 
 - Wire `PolymarketMarketStream` (`connectors/polymarket_ws.py`) into the daemon. Also subscribe to the `user` channel for fills/cancels.
@@ -147,7 +149,7 @@ Verification:
 - Unit: WS reconnect logic, parse of Polymarket `book`/`last_trade_price`/`price_change`, Binance `bookTicker`+`aggTrade`, vol/return aggregators.
 - Integration: 10-minute paper run in btc_1h should log ≥200 book updates/min with no REST polls on the hot path.
 
-### Phase 2 — Deterministic quant fair-value model
+### Phase 2 — Deterministic quant fair-value model ✅
 Goal: replace the heuristic / LLM scorer with a closed-form probability model.
 
 - Up/down: drift-less GBM over τ, `fair_yes = 1 − Φ(-d)` with small momentum tilt from last-5m log return and signed-flow imbalance.
@@ -162,14 +164,15 @@ Verification:
 - Golden tests over fixtures.
 - Walk-forward backtest on journaled data: hit rate > 50%, avg edge > fees.
 
-### Phase 3 — Execution: maker-first router with cancel/replace + SELL + TTL exits
-- Split execution into `engine/execution/router.py` + `engine/execution/live.py`.
-- Route: `TTE > T_maker_min` AND `edge > E_maker` → GTC post-only; else FOK taker.
-- Cancel/replace on edge drop or best-level move > 1 tick.
-- Force-close near exit with `max(base_s, pct * TTE)`.
-- Fix buy-only executor: accept BUY/SELL from decision.
-- Fix live-fill → PositionRecord bridge via user WS channel.
-- Paper fills walk the book VWAP-style.
+### Phase 3 — Execution: maker-first router with cancel/replace + SELL + TTL exits ✅
+- Split execution into `engine/execution/` package with `router.py` + `engine.py`.
+- Route: `TTE > EXECUTION_MAKER_MIN_TTE_SECONDS` AND `edge > EXECUTION_MAKER_MIN_EDGE` → GTC post-only; else FOK taker.
+- Cancel/replace helper: `ExecutionRouter.should_replace` + `PolymarketConnector.replace_live_order`.
+- Fixed buy-only executor: `TradeDecision.order_side` (BUY/SELL) threaded through to `py-clob-client`.
+- Live-fill → PositionRecord bridge: `record_execution` handles real live fills, and `PortfolioEngine.record_live_fill` accepts user-channel updates for orders that rest first and fill later.
+- `AgentService.close_position` posts a SELL-side counter order when in live mode, gated on readonly-ready auth.
+- Paper fills walk top-10 `bid_levels`/`ask_levels` VWAP-style; `ExecutionResult` reports filled/remaining shares.
+- Future Phase 3 extensions (force-close near exit, stream-driven user WS reconciliation loop) are tracked alongside Phase 5 operational work.
 
 ### Phase 4 — Per-family risk + correlation-aware portfolio
 - `RiskProfile` per family: `btc_1h`, `btc_15m`, `btc_5m`.
