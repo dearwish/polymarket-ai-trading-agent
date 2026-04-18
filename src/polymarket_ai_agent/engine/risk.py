@@ -140,6 +140,10 @@ class RiskEngine:
         reasons = [] if approved else ["Risk checks failed."]
         return RiskState(approved=approved, reasons=reasons, rejected_by=rejected_by)
 
+    def exit_buffer_seconds_for_tte(self, seconds_to_expiry: int) -> int:
+        """Public accessor for the daemon's close-on-expiry sweep."""
+        return self._effective_exit_buffer(seconds_to_expiry)
+
     def _effective_exit_buffer(self, seconds_to_expiry: int) -> int:
         """Dynamic buffer: ``max(floor, pct * family_window)``.
 

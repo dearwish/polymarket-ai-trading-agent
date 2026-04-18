@@ -285,6 +285,115 @@ def test_daemon_kill_switch_gates_decision_callback(tmp_path: Path) -> None:
     assert stop_events, "safety_stop event should be journalled"
 
 
+def test_daemon_paper_execute_callback_opens_and_closes_position(tmp_path: Path) -> None:
+    """Directly exercise the paper-execute callback on a real AgentService.
+
+    Seeds a MarketState with a liquid YES book + a manually-built APPROVED
+    assessment, invokes the callback, and asserts that a paper position is
+    opened. A second invocation with TTE inside the exit buffer must close it.
+    """
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.btc_state import BtcSnapshot
+    from polymarket_ai_agent.engine.market_state import MarketState
+    from polymarket_ai_agent.types import MarketAssessment, SuggestedSide
+
+    settings = _settings(tmp_path).model_copy(update={
+        "daemon_auto_paper_execute": True,
+        "max_position_usd": 10.0,
+        "min_confidence": 0.0,
+        "min_edge": 0.0,
+        "max_spread": 0.10,
+        "min_depth_usd": 0.0,
+        "stale_data_seconds": 3600,
+        "max_concurrent_positions": 5,
+    })
+    service = AgentService(settings)
+    candidate = _candidate("m-paper", "yes-tok", "no-tok")
+
+    # Build a runner + inject market state directly (skip the WS loop).
+    runner = DaemonRunner(
+        settings=settings,
+        service=service,
+        config=DaemonConfig(market_family=settings.market_family),
+        market_stream_factory=lambda url: FakeMarketStream([]),  # type: ignore[arg-type]
+        btc_feed_factory=lambda: FakeBtcFeed([]),  # type: ignore[arg-type]
+    )
+    state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.40", "size": "500"}],
+        "asks": [{"price": "0.42", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state
+    runner._candidates[candidate.market_id] = candidate
+
+    # Hand-craft an APPROVED YES assessment so the risk engine takes the trade.
+    approved = MarketAssessment(
+        market_id=candidate.market_id,
+        fair_probability=0.60,
+        confidence=0.80,
+        suggested_side=SuggestedSide.YES,
+        expiry_risk="LOW",
+        reasons_for_trade=["edge > threshold"],
+        reasons_to_abstain=[],
+        edge=0.15,
+        raw_model_output="unit-test",
+        edge_yes=0.15,
+        edge_no=-0.17,
+        fair_probability_no=0.40,
+        slippage_bps=10.0,
+    )
+    features = state.features()
+    btc = BtcSnapshot(
+        price=70000.0,
+        observed_at=datetime.now(timezone.utc),
+        log_return_10s=0.0,
+        log_return_1m=0.0,
+        log_return_5m=0.0,
+        log_return_15m=0.0,
+        realized_vol_30m=0.01,
+        sample_count=50,
+    )
+    context = DecisionContext(
+        market_id=candidate.market_id,
+        candidate=candidate,
+        features=features,
+        btc_snapshot=btc,
+        assessment=approved,
+        metrics=runner.metrics,
+    )
+
+    # First invocation: should open a position.
+    asyncio.run(runner._paper_execute_decision_callback(context))
+    positions = service.portfolio.list_open_positions()
+    assert len(positions) == 1
+    assert positions[0].market_id == candidate.market_id
+    assert positions[0].side == SuggestedSide.YES
+
+    # Second invocation while a position is open: must NOT stack a duplicate.
+    asyncio.run(runner._paper_execute_decision_callback(context))
+    assert len(service.portfolio.list_open_positions()) == 1
+
+    # Simulate end-of-window: force TTE to 0 by rewriting candidate.end_date_iso.
+    from dataclasses import replace as dataclass_replace
+    expired = dataclass_replace(candidate, end_date_iso="2020-01-01T00:00:00Z")
+    runner._candidates[candidate.market_id] = expired
+    expired_context = DecisionContext(
+        market_id=candidate.market_id,
+        candidate=expired,
+        features=features,
+        btc_snapshot=btc,
+        assessment=approved,
+        metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(expired_context))
+    # Position should now be closed.
+    assert service.portfolio.list_open_positions() == []
+    closed = service.portfolio.list_closed_positions(limit=5)
+    assert len(closed) == 1
+    assert closed[0].close_reason == "paper_tte_exit"
+
+
 def test_agent_service_attributes_available() -> None:
     # Sanity: the real AgentService exposes `journal` + `discover_markets`, so the
     # daemon's expectations on the service API stay coupled to the production type.

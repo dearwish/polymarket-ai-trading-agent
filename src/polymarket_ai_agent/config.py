@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     ws_ssl_verify: bool = True
     daemon_discovery_interval_seconds: int = 60
     daemon_decision_min_interval_seconds: float = 1.0
+    # When True the daemon auto-executes APPROVED decisions as paper trades.
+    # Positions are recorded in the portfolio so the dashboard / report paths
+    # fill in without any separate CLI invocation. Safe by default (opt-in).
+    daemon_auto_paper_execute: bool = False
     polymarket_private_key: str = ""
     polymarket_funder: str = ""
     polymarket_signature_type: int = 0

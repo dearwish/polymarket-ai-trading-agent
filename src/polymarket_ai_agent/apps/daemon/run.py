@@ -16,7 +16,15 @@ from polymarket_ai_agent.engine.market_state import MarketFeatures, MarketState
 from polymarket_ai_agent.engine.quant_scoring import QuantScoringEngine
 from polymarket_ai_agent.engine.research import ResearchEngine
 from polymarket_ai_agent.service import AgentService
-from polymarket_ai_agent.types import MarketAssessment, MarketCandidate
+from polymarket_ai_agent.types import (
+    DecisionStatus,
+    ExecutionMode,
+    MarketAssessment,
+    MarketCandidate,
+    MarketSnapshot,
+    OrderBookSnapshot,
+    SuggestedSide,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +149,12 @@ class DaemonRunner:
                 ssl_verify=settings.ws_ssl_verify,
             )
         )
-        self._decision_callback = decision_callback or self._default_decision_callback
+        if decision_callback is not None:
+            self._decision_callback = decision_callback
+        elif settings.daemon_auto_paper_execute:
+            self._decision_callback = self._paper_execute_decision_callback
+        else:
+            self._decision_callback = self._default_decision_callback
         self.metrics = DaemonMetrics()
         self.btc_state = BtcState()
         self.research = ResearchEngine()
@@ -403,6 +416,91 @@ class DaemonRunner:
             "expiry_risk": assessment.expiry_risk,
         }
         await asyncio.to_thread(self.service.journal.log_event, "daemon_tick", payload)
+
+    async def _paper_execute_decision_callback(self, context: DecisionContext) -> None:
+        """Log the tick AND run the full paper pipeline: risk → execute → position.
+
+        Skips entry if the market already has an open paper position. Closes an
+        existing position when TTE drops inside the per-family exit buffer, so
+        the portfolio realises PnL rather than leaving stale open positions.
+        """
+        await self._default_decision_callback(context)
+
+        market_id = context.market_id
+        candidate = context.candidate
+        features = context.features
+        assessment = context.assessment
+        tte_seconds = self._seconds_to_expiry(candidate.end_date_iso)
+
+        orderbook = self._build_orderbook_from_state(market_id, features)
+        if orderbook is None:
+            return  # No usable book yet — skip this tick.
+
+        # Close an already-open position if we're inside the exit window.
+        open_pos = await asyncio.to_thread(self.service.portfolio.get_open_position, market_id)
+        if open_pos is not None:
+            exit_buffer = self.service.risk.exit_buffer_seconds_for_tte(tte_seconds)
+            if tte_seconds <= exit_buffer:
+                exit_price = features.mid_yes if open_pos.side == SuggestedSide.YES else features.mid_no
+                if exit_price > 0.0:
+                    await asyncio.to_thread(
+                        self.service.portfolio.close_position,
+                        market_id,
+                        float(exit_price),
+                        "paper_tte_exit",
+                    )
+            return  # Do not open a duplicate while a position is live.
+
+        snapshot = MarketSnapshot(
+            candidate=candidate,
+            orderbook=orderbook,
+            seconds_to_expiry=tte_seconds,
+            recent_price_change_bps=0.0,
+            recent_trade_count=features.trade_count_5s,
+            external_price=context.btc_snapshot.price if context.btc_snapshot else 0.0,
+        )
+        account_state = await asyncio.to_thread(
+            self.service.portfolio.get_account_state, ExecutionMode.PAPER
+        )
+        decision = self.service.risk.decide_trade(snapshot, assessment, account_state)
+        await asyncio.to_thread(self.service.journal.log_event, "trade_decision", decision)
+        if decision.status != DecisionStatus.APPROVED:
+            return
+        result = self.service.execution.execute_trade(
+            decision,
+            orderbook,
+            seconds_to_expiry=tte_seconds,
+            edge=assessment.edge,
+        )
+        await asyncio.to_thread(self.service.portfolio.record_execution, decision, result)
+        await asyncio.to_thread(self.service.journal.log_event, "execution_result", result)
+
+    def _build_orderbook_from_state(
+        self, market_id: str, features: MarketFeatures
+    ) -> OrderBookSnapshot | None:
+        """Snapshot the live per-market order book from WS state (no REST call)."""
+        state = self._market_states.get(market_id)
+        if state is None:
+            return None
+        yes_book = state.yes_book
+        bid_levels = list(yes_book.bids.sorted_levels()[:10])
+        ask_levels = list(yes_book.asks.sorted_levels()[:10])
+        best_bid = features.bid_yes
+        best_ask = features.ask_yes
+        if not best_bid and not best_ask:
+            return None
+        midpoint = features.mid_yes or best_bid or best_ask
+        return OrderBookSnapshot(
+            bid=best_bid,
+            ask=best_ask,
+            midpoint=midpoint,
+            spread=features.spread_yes,
+            depth_usd=features.depth_usd_yes,
+            last_trade_price=yes_book.last_trade_price or midpoint,
+            two_sided=features.two_sided,
+            bid_levels=bid_levels,
+            ask_levels=ask_levels,
+        )
 
     # --- Heartbeat + maintenance --------------------------------------
 
