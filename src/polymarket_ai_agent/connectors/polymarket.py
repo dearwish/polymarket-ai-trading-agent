@@ -367,29 +367,24 @@ class PolymarketConnector:
         return int((expiry - datetime.now(timezone.utc)).total_seconds())
 
     def _matches_market_family(self, item: dict[str, Any]) -> bool:
+        question = str(item.get("question") or "")
+        description = str(item.get("description") or "")
+        slug = str(item.get("slug") or "")
         if self.settings.market_family == "btc_1h":
-            return self._market_family_score(
-                str(item.get("question") or ""),
-                str(item.get("description") or ""),
-                str(item.get("slug") or ""),
-            ) >= 5
+            return self._market_family_score(question, description, slug) >= 5
+        if self.settings.market_family == "btc_15m":
+            return self._market_family_score(question, description, slug) >= 3
         if self.settings.market_family == "btc_5m":
-            return self._market_family_score(
-                str(item.get("question") or ""),
-                str(item.get("description") or ""),
-                str(item.get("slug") or ""),
-            ) >= 3
+            return self._market_family_score(question, description, slug) >= 3
         if self.settings.market_family == "btc_daily_threshold":
-            return self._market_family_score(
-                str(item.get("question") or ""),
-                str(item.get("description") or ""),
-                str(item.get("slug") or ""),
-            ) >= 4
+            return self._market_family_score(question, description, slug) >= 4
         return True
 
     def _market_family_score(self, question: str, description: str, slug: str) -> int:
         if self.settings.market_family == "btc_1h":
             return self._btc_1h_match_score(question, description, slug)
+        if self.settings.market_family == "btc_15m":
+            return self._btc_15m_match_score(question, description, slug)
         if self.settings.market_family == "btc_5m":
             return self._btc_5m_match_score(question, description, slug)
         if self.settings.market_family == "btc_daily_threshold":
@@ -399,6 +394,8 @@ class PolymarketConnector:
     def _active_market_max_expiry_seconds(self) -> int | None:
         if self.settings.market_family == "btc_1h":
             return 3 * 60 * 60
+        if self.settings.market_family == "btc_15m":
+            return 30 * 60
         if self.settings.market_family == "btc_5m":
             return 20 * 60
         if self.settings.market_family == "btc_daily_threshold":
@@ -408,7 +405,7 @@ class PolymarketConnector:
     def _discovery_request_limit(self, requested_limit: int) -> int:
         if self.settings.market_family == "btc_1h":
             return max(requested_limit, 800)
-        if self.settings.market_family in {"btc_5m", "btc_daily_threshold"}:
+        if self.settings.market_family in {"btc_15m", "btc_5m", "btc_daily_threshold"}:
             return max(requested_limit, 200)
         return requested_limit
 
@@ -605,6 +602,39 @@ class PolymarketConnector:
             score += 2
         if has_hourly_family_pattern:
             score += 1
+        return score
+
+    @staticmethod
+    def _btc_15m_match_score(question: str, description: str, slug: str) -> int:
+        joined = " ".join([question, description, slug]).lower()
+        has_btc = "bitcoin" in joined or "btc" in joined
+        if not has_btc:
+            return 0
+        has_15m_window = (
+            "15 minutes" in joined
+            or "fifteen minutes" in joined
+            or "quarter hour" in joined
+            or re.search(r"\b15m\b", joined) is not None
+            or re.search(r"\b15-?minute\b", joined) is not None
+        )
+        has_direction = any(
+            phrase in joined
+            for phrase in (
+                "up or down",
+                "above or below",
+                "higher or lower",
+                "rise or fall",
+                "go up or down",
+            )
+        )
+        mentions_short_expiry = "minute" in joined or re.search(r"\b\d+m\b", joined) is not None
+        score = 1  # BTC match
+        if has_15m_window:
+            score += 2
+        elif mentions_short_expiry:
+            score += 1
+        if has_direction:
+            score += 2
         return score
 
     @staticmethod
