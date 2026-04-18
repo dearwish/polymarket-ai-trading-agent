@@ -100,7 +100,16 @@ class PortfolioEngine:
                         result.executed_at.isoformat(),
                     ),
                 )
-            if not result.success or result.status != "FILLED_PAPER":
+            if not result.success:
+                conn.commit()
+                return
+            is_paper_fill = result.status == "FILLED_PAPER"
+            is_live_fill = (
+                result.mode == ExecutionMode.LIVE
+                and result.fill_price > 0.0
+                and result.filled_size_shares > 0.0
+            )
+            if not (is_paper_fill or is_live_fill):
                 conn.commit()
                 return
             conn.execute(
@@ -125,6 +134,79 @@ class PortfolioEngine:
                 ),
             )
             conn.commit()
+
+    def record_live_fill(
+        self,
+        order_id: str,
+        market_id: str,
+        asset_id: str,
+        side: SuggestedSide,
+        fill_price: float,
+        filled_size_shares: float,
+        filled_at: datetime | None = None,
+    ) -> PositionRecord | None:
+        """Create or update a PositionRecord for a live order that just filled.
+
+        The user-channel reconciliation loop calls this when a Polymarket order
+        transitions from ``MATCHED/FILLED`` — we persist the realised entry
+        price and share size so paper and live positions follow an identical
+        lifecycle (TTL exits, manage, close).
+        """
+        if fill_price <= 0.0 or filled_size_shares <= 0.0:
+            return None
+        timestamp = filled_at or _utc_now()
+        size_usd = round(fill_price * filled_size_shares, 6)
+        with sqlite3.connect(self.db_path) as conn:
+            existing = conn.execute(
+                "select market_id from positions where order_id = ? and status = 'OPEN' limit 1",
+                (order_id,),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    update positions
+                    set entry_price = ?, size_usd = ?, opened_at = ?
+                    where order_id = ? and status = 'OPEN'
+                    """,
+                    (fill_price, size_usd, timestamp.isoformat(), order_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    insert into positions(
+                        market_id, side, size_usd, entry_price, order_id, opened_at, status,
+                        close_reason, closed_at, exit_price, realized_pnl
+                    ) values (?, ?, ?, ?, ?, ?, 'OPEN', '', NULL, 0.0, 0.0)
+                    """,
+                    (
+                        market_id,
+                        side.value,
+                        size_usd,
+                        fill_price,
+                        order_id,
+                        timestamp.isoformat(),
+                    ),
+                )
+            conn.execute(
+                """
+                update live_orders
+                set status = 'MATCHED',
+                    detail = coalesce(detail, '') || ' | fill=' || ?,
+                    updated_at = ?
+                where order_id = ?
+                """,
+                (f"{fill_price:.6f}", timestamp.isoformat(), order_id),
+            )
+            conn.commit()
+        return PositionRecord(
+            market_id=market_id,
+            side=side,
+            size_usd=size_usd,
+            entry_price=fill_price,
+            order_id=order_id,
+            opened_at=timestamp,
+            status="OPEN",
+        )
 
     def get_rejected_orders(self, now: datetime | None = None) -> int:
         current = now or _utc_now()
