@@ -1205,13 +1205,7 @@ function SettingsPage({
   onRefresh: () => Promise<void>;
 }) {
   const [values, setValues] = useState<Record<string, string | number | boolean>>({});
-  const [watchIterations, setWatchIterations] = useState(3);
-  const [watchInterval, setWatchInterval] = useState(2);
   const [saveMessage, setSaveMessage] = useState("");
-  const [actionMessage, setActionMessage] = useState("");
-  const [actionError, setActionError] = useState("");
-  const [actionResult, setActionResult] = useState<string>("");
-  const [busyAction, setBusyAction] = useState("");
 
   useEffect(() => {
     setValues(settings?.values ?? {});
@@ -1228,22 +1222,6 @@ function SettingsPage({
 
   const updateValue = (key: string, value: string | number | boolean) => {
     setValues((current) => ({ ...current, [key]: value }));
-  };
-
-  const runAction = async (path: string, body: Record<string, unknown>, label: string) => {
-    setBusyAction(label);
-    setActionError("");
-    setActionMessage("");
-    try {
-      const result = await sendJson<Record<string, unknown>>(path, "POST", body);
-      setActionResult(JSON.stringify(result, null, 2));
-      setActionMessage(`${label} completed.`);
-      await onRefresh();
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : `${label} failed.`);
-    } finally {
-      setBusyAction("");
-    }
   };
 
   const saveSettings = async () => {
@@ -1369,69 +1347,6 @@ function SettingsPage({
         </div>
       </article>
 
-      <article className="panel">
-        <div className="panel-header">
-          <h2>GUI Actions</h2>
-          <span>Operator-safe API controls</span>
-        </div>
-        <div className="action-grid">
-          <button
-            type="button"
-            className="refresh-button"
-            disabled={busyAction === "simulate-active"}
-            onClick={() => void runAction("/api/actions/simulate-active", { active: true }, "simulate-active")}
-          >
-            Simulate Active
-          </button>
-          <button
-            type="button"
-            className="refresh-button"
-            disabled={busyAction === "live-preflight"}
-            onClick={() => void runAction("/api/actions/live-preflight", { active: true }, "live-preflight")}
-          >
-            Live Preflight
-          </button>
-          <button
-            type="button"
-            className="refresh-button"
-            disabled={busyAction === "live-reconcile"}
-            onClick={() => void runAction("/api/actions/live-reconcile", { active: true }, "live-reconcile")}
-          >
-            Live Reconcile
-          </button>
-        </div>
-        <div className="watch-controls">
-          <label className="settings-field">
-            <span>Watch Iterations</span>
-            <input type="number" min={1} max={100} value={watchIterations} onChange={(event) => setWatchIterations(Number(event.target.value))} />
-          </label>
-          <label className="settings-field">
-            <span>Watch Interval Seconds</span>
-            <input type="number" min={0} max={60} value={watchInterval} onChange={(event) => setWatchInterval(Number(event.target.value))} />
-          </label>
-          <button
-            type="button"
-            className="refresh-button"
-            disabled={busyAction === "live-watch"}
-            onClick={() =>
-              void runAction(
-                "/api/actions/live-watch",
-                { active: true, iterations: watchIterations, interval_seconds: watchInterval },
-                "live-watch",
-              )
-            }
-          >
-            Live Watch
-          </button>
-        </div>
-        {actionMessage && <div className="banner">{actionMessage}</div>}
-        {actionError && <div className="banner error">{actionError}</div>}
-        <div className="panel-header">
-          <h2>Last Action Result</h2>
-          <span>{busyAction ? `Running ${busyAction}` : "idle"}</span>
-        </div>
-        <pre className="event-preview action-result">{actionResult || "Run an action to inspect the response."}</pre>
-      </article>
     </section>
   );
 }
