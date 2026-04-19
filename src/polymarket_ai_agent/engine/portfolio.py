@@ -446,6 +446,30 @@ class PortfolioEngine:
     def get_open_position(self, market_id: str) -> PositionRecord | None:
         return self._get_open_position(market_id)
 
+    def list_closed_tranches_for_order(self, base_order_id: str) -> list[PositionRecord]:
+        """Return CLOSED tranche rows whose order_id starts with
+        ``{base_order_id}-T``.
+
+        Used on daemon startup to rehydrate the in-memory ladder state
+        (tranches_closed + original_size_usd) for positions that were opened
+        and partially closed in a previous daemon session.
+        """
+        if not base_order_id:
+            return []
+        like_pattern = f"{base_order_id}-T%"
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            rows = conn.execute(
+                """
+                select market_id, side, size_usd, entry_price, order_id, opened_at, status,
+                       close_reason, closed_at, exit_price, realized_pnl
+                from positions
+                where status = 'CLOSED' and order_id like ?
+                order by closed_at asc
+                """,
+                (like_pattern,),
+            ).fetchall()
+        return [self._row_to_position(row) for row in rows]
+
     def close_position(self, market_id: str, exit_price: float, reason: str, now: datetime | None = None) -> PositionAction:
         current = now or _utc_now()
         position = self._get_open_position(market_id)

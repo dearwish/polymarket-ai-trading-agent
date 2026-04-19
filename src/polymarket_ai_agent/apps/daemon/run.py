@@ -509,20 +509,15 @@ class DaemonRunner:
             entry_price = float(open_pos.entry_price)
             if current_price > 0.0 and entry_price > 0.0:
                 pnl_pct = (current_price - entry_price) / entry_price
-                # Bootstrap per-position state on first sight. original_size_usd
-                # is pinned from the opening size so ladder fractions apply to
-                # the ORIGINAL position (1/3 of $10 = $3.33 every time), not to
-                # the ever-shrinking remainder (which would give $3.33, $2.22,
-                # $1.48, …). On daemon restart we lose in-memory state and fall
-                # back to treating the current remaining size as the original.
-                extras = self._position_extras.setdefault(
-                    market_id,
-                    {
-                        "peak_price": 0.0,
-                        "tranches_closed": 0.0,
-                        "original_size_usd": float(open_pos.size_usd),
-                    },
-                )
+                # Bootstrap per-position state on first sight. If the daemon
+                # is being seen post-restart, rehydrate original_size_usd and
+                # tranches_closed from DB-persisted closed tranches so the
+                # ladder doesn't re-fire step 1 on the shrunken remainder.
+                # peak_price can't be recovered — restart the trail fresh from
+                # whatever the current price is (safer than guessing).
+                if market_id not in self._position_extras:
+                    self._position_extras[market_id] = self._hydrate_position_extras(open_pos)
+                extras = self._position_extras[market_id]
                 if current_price > extras["peak_price"]:
                     extras["peak_price"] = current_price
                 # --- 1. TP ladder (partial close) -------------------------
@@ -680,6 +675,31 @@ class DaemonRunner:
             bid_levels=bid_levels,
             ask_levels=ask_levels,
         )
+
+    def _hydrate_position_extras(self, open_pos) -> dict[str, float]:
+        """Build a fresh per-position extras dict, rehydrating ladder state
+        from the DB so daemon restarts don't corrupt scale-out accounting.
+
+        - ``tranches_closed`` = number of tp_ladder partial-closes already
+          recorded for this position's base order_id.
+        - ``original_size_usd`` = current remaining size + sum of every
+          previously-closed tranche's size.
+        - ``peak_price`` = 0 (rebuilds from this point forward — intentional:
+          we can't reconstruct the high-water mark from closed-position rows).
+        """
+        closed_size = 0.0
+        tp_ladder_count = 0
+        if open_pos.order_id:
+            tranches = self.service.portfolio.list_closed_tranches_for_order(open_pos.order_id)
+            for t in tranches:
+                closed_size += float(t.size_usd)
+                if t.close_reason and t.close_reason.startswith("paper_tp_ladder_"):
+                    tp_ladder_count += 1
+        return {
+            "peak_price": 0.0,
+            "tranches_closed": float(tp_ladder_count),
+            "original_size_usd": float(open_pos.size_usd) + closed_size,
+        }
 
     def _paper_exit_fill(
         self, market_id: str, side: "SuggestedSide", size_usd: float, fallback_price: float

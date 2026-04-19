@@ -711,6 +711,61 @@ def test_fixed_tp_skipped_after_ladder_tranche_fires(tmp_path) -> None:
     )
 
 
+def test_ladder_state_rehydrates_from_db_after_daemon_restart(tmp_path) -> None:
+    """Regression for observed bug where a daemon restart mid-trade caused the
+    ladder to re-fire step 1 on the shrunken remainder (sizes $3.30 → $2.21 →
+    $1.48 instead of $3.33 → $3.33 → $3.33). After restart the daemon must
+    reconstruct tranches_closed + original_size_usd from closed-tranche rows.
+    """
+    from polymarket_ai_agent.apps.daemon.run import DaemonRunner, DaemonConfig
+    from polymarket_ai_agent.types import (
+        DecisionStatus, ExecutionMode, ExecutionResult, SuggestedSide, TradeDecision,
+    )
+
+    settings = _settings(tmp_path).model_copy(update={
+        "daemon_auto_paper_execute": True,
+        "paper_tp_ladder": "0.10:0.33,0.20:0.33",
+    })
+    service = AgentService(settings)
+    # Open a paper position at $10, then fire one ladder partial (closes $3.33).
+    decision = TradeDecision(
+        market_id="rehyd-mkt",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.50,
+        rationale=["ok"],
+        rejected_by=[],
+    )
+    result = ExecutionResult(
+        market_id="rehyd-mkt",
+        success=True, mode=ExecutionMode.PAPER,
+        order_id="paper-order-000042",
+        status="FILLED_PAPER", detail="ok", fill_price=0.50,
+    )
+    service.portfolio.record_execution(decision, result)
+    service.portfolio.partial_close_position(
+        "rehyd-mkt", fraction=0.333, exit_price=0.55, reason="paper_tp_ladder_1",
+    )
+    open_pos = service.portfolio.get_open_position("rehyd-mkt")
+    assert open_pos is not None
+    # Simulate a daemon restart: build a new runner, call the rehydrator.
+    runner = DaemonRunner(
+        settings=settings,
+        service=service,
+        config=DaemonConfig(market_family=settings.market_family),
+        market_stream_factory=lambda url: FakeMarketStream([]),  # type: ignore[arg-type]
+        btc_feed_factory=lambda: FakeBtcFeed([]),  # type: ignore[arg-type]
+    )
+    extras = runner._hydrate_position_extras(open_pos)
+    # Should see tranches_closed=1 (one ladder partial previously fired) and
+    # original_size_usd ≈ $10 (current remainder + one closed ~$3.33 tranche).
+    assert extras["tranches_closed"] == 1.0
+    assert abs(extras["original_size_usd"] - 10.0) < 0.01
+    # Peak price intentionally reset on restart (can't reconstruct).
+    assert extras["peak_price"] == 0.0
+
+
 def test_paper_exit_fill_walks_bid_book_for_yes_position(tmp_path) -> None:
     """A YES close should walk yes_book.bids from best down, VWAP the
     consumed notional, and return that instead of just applying slippage
