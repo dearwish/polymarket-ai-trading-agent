@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     execution_exit_buffer_floor_seconds: int = 10
     execution_exit_buffer_pct_of_tte: float = 0.1
     quant_drift_damping: float = 0.5
+    # When True the scorer flips fair_yes to (1 - fair_yes). Used to test the
+    # hypothesis that BTC short-horizon moves mean-revert rather than follow
+    # GBM continuation: if the unflipped hit rate is significantly < 50% with
+    # a strong Brier score, flipping should land the signal in the 60-90% band.
+    quant_invert_drift: bool = False
     quant_imbalance_tilt: float = 0.03
     quant_slippage_baseline_bps: float = 15.0
     quant_slippage_spread_coef: float = 0.25

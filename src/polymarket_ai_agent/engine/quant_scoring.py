@@ -78,10 +78,17 @@ class QuantScoringEngine:
         imbalance = max(-1.0, min(1.0, float(packet.imbalance_top5_yes)))
         tilt = imbalance * float(self.settings.quant_imbalance_tilt)
         fair_yes = fair_from_drift + tilt
+        # Mean-reversion inversion test: flip fair_yes if the flag is set.
+        # Applied post-tilt so both drift and imbalance signals reverse sign
+        # consistently. Only affects output; all intermediate math stays the same.
+        inverted = bool(self.settings.quant_invert_drift)
+        if inverted:
+            fair_yes = 1.0 - fair_yes
         fair_yes = max(0.01, min(0.99, fair_yes))
         reasons = [
             f"z={z:+.2f} drift={drift:+.5f} σ_per_s={sigma_per_second:.6f} expected_stdev={expected_stdev:.5f}",
-            f"imbalance tilt={tilt:+.4f} base_fair={fair_from_drift:.4f} fair_yes={fair_yes:.4f}",
+            f"imbalance tilt={tilt:+.4f} base_fair={fair_from_drift:.4f} fair_yes={fair_yes:.4f}"
+            + (" [inverted]" if inverted else ""),
         ]
         return fair_yes, reasons
 

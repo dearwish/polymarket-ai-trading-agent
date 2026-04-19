@@ -76,6 +76,20 @@ def test_positive_drift_biases_fair_above_half(tmp_path: Path) -> None:
     assert assessment.fair_probability > 0.5
 
 
+def test_quant_invert_drift_flips_fair_around_half(tmp_path: Path) -> None:
+    """When quant_invert_drift=True the scorer should return the mirror of
+    its un-inverted fair_yes (around 0.5). Validates the mean-reversion
+    test-flag does what it says."""
+    # Same positive-drift packet evaluated with and without inversion.
+    packet = _packet(btc_log_return_since_candle_open=0.01, realized_vol_30m=0.02, seconds_to_expiry=600)
+    straight = QuantScoringEngine(_settings(tmp_path)).score_market(packet)
+    inverted = QuantScoringEngine(_settings(tmp_path, quant_invert_drift=True)).score_market(packet)
+    assert straight.fair_probability > 0.5
+    assert inverted.fair_probability < 0.5
+    # Mirror around 0.5 (within float noise and the 0.01/0.99 clamp).
+    assert abs((straight.fair_probability + inverted.fair_probability) - 1.0) < 1e-6
+
+
 def test_candle_open_log_return_takes_precedence_over_rolling_windows(tmp_path: Path) -> None:
     """For "up or down" candle markets the scorer must use Δ_since_candle_open,
     not a rolling 5m/15m window. When the candle-open field is populated it
