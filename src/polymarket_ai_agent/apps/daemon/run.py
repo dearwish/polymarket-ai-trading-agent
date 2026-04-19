@@ -549,10 +549,17 @@ class DaemonRunner:
                     self._last_close_at[market_id] = _utc_now()
                     return
                 # --- 3 + 4. Fixed TP / SL ---------------------------------
+                # If any ladder tranche has already fired, the remaining slice
+                # is meant to "ride the runner" and be captured by the trail —
+                # firing a second full TP on it defeats the scale-out strategy.
+                # So fixed TP only applies when NO tranche has fired yet (either
+                # no ladder configured, or ladder hasn't hit its first threshold
+                # yet). Stop-loss still applies unconditionally as a safety floor.
                 tp_pct = float(self.settings.paper_take_profit_pct)
                 sl_pct = float(self.settings.paper_stop_loss_pct)
+                ladder_has_fired = int(extras["tranches_closed"]) > 0
                 close_reason: str | None = None
-                if tp_pct > 0.0 and pnl_pct >= tp_pct:
+                if tp_pct > 0.0 and not ladder_has_fired and pnl_pct >= tp_pct:
                     close_reason = "paper_take_profit"
                 elif sl_pct > 0.0 and pnl_pct <= -sl_pct:
                     close_reason = "paper_stop_loss"

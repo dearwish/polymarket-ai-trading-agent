@@ -608,6 +608,65 @@ def test_paper_tp_ladder_closes_position_in_tranches(tmp_path) -> None:
     assert any(p.close_reason == "paper_tp_ladder_2" for p in closed_after_second)
 
 
+def test_fixed_tp_skipped_after_ladder_tranche_fires(tmp_path) -> None:
+    """After a ladder partial-close fires, the remaining slice must NOT be
+    closed by the fixed take-profit — scale-out strategy expects the runner
+    to ride under trailing stop + SL only. Regression test for observed bug
+    where ladder_1 then ladder_2 then paper_take_profit all fired on the
+    same position.
+    """
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    runner, service, candidate, approved, btc = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50, settings_overrides={
+            "paper_tp_ladder": "0.10:0.5",     # one tranche: close 50% at +10%
+            "paper_take_profit_pct": 0.25,     # fixed TP at +25%
+            "paper_trailing_stop_pct": 0.0,    # trail disabled for this test
+        },
+    )
+
+    # Move mid enough to fire the ladder (+17% on 0.51051 entry).
+    state_ladder = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state_ladder.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.59", "size": "500"}],
+        "asks": [{"price": "0.61", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state_ladder
+    ctx_ladder = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state_ladder.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx_ladder))
+    # Ladder fired, remainder still open.
+    open_positions = service.portfolio.list_open_positions()
+    assert len(open_positions) == 1
+    assert abs(open_positions[0].size_usd - 5.0) < 1e-6
+
+    # Now push further to +30% — would trigger fixed TP (0.25) if the guard
+    # didn't exist. With the guard: position stays open, only trail/SL can close.
+    state_past_tp = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state_past_tp.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": "0.66", "size": "500"}],
+        "asks": [{"price": "0.68", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state_past_tp
+    ctx_past_tp = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state_past_tp.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx_past_tp))
+    # Remainder must still be open — no paper_take_profit fire after ladder.
+    assert len(service.portfolio.list_open_positions()) == 1
+    closed = service.portfolio.list_closed_positions(limit=5)
+    reasons = [p.close_reason for p in closed]
+    assert "paper_take_profit" not in reasons, (
+        f"fixed TP fired on ladder remainder: {reasons}"
+    )
+
+
 def test_paper_trail_arm_threshold_blocks_premature_trail_exit(tmp_path) -> None:
     """Without the arm threshold, a small +2% peak + 5% trail would exit
     the position at a loss. With paper_trail_arm_pct=0.05 the trail stays

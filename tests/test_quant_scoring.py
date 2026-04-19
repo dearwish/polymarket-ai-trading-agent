@@ -20,6 +20,9 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
         db_path=tmp_path / "data" / "agent.db",
         events_path=tmp_path / "logs" / "events.jsonl",
         runtime_settings_path=tmp_path / "data" / "runtime_settings.json",
+        # Explicitly pin experiment flags so tests don't pick them up from
+        # the real .env (e.g. when QUANT_INVERT_DRIFT=true is enabled live).
+        quant_invert_drift=False,
     )
     base.update(overrides)
     return Settings(**base)
