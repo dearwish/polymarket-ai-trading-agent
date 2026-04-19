@@ -1309,9 +1309,8 @@ function SettingsPage({
   };
 
   return (
-    <>
+    <section className="settings-stack">
       <DisplayPrefsPanel />
-      <section className="grid detail-grid">
       <article className="panel">
         <div className="panel-header">
           <h2>Runtime Settings</h2>
@@ -1433,8 +1432,7 @@ function SettingsPage({
         </div>
         <pre className="event-preview action-result">{actionResult || "Run an action to inspect the response."}</pre>
       </article>
-      </section>
-    </>
+    </section>
   );
 }
 
