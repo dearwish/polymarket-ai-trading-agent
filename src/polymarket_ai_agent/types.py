@@ -103,6 +103,11 @@ class EvidencePacket:
     realized_vol_30m: float = 0.0
     # For threshold markets ("above $K"): ln(BTC_now / K). Zero for non-threshold.
     btc_log_return_vs_strike: float = 0.0
+    # For directional "Up or Down" candle markets: ln(BTC_now / BTC_at_candle_open).
+    # This is the drift observed SO FAR inside the market's own window, which is
+    # what the GBM model needs: P(YES) = Φ(Δ_observed / (σ√τ_remaining)). Zero when
+    # we haven't observed enough BTC history or the window hasn't started.
+    btc_log_return_since_candle_open: float = 0.0
     time_elapsed_in_candle_s: int = 0
     generated_at: datetime = field(default_factory=utc_now)
 

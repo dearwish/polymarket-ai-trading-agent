@@ -70,6 +70,7 @@ class ResearchEngine:
         btc_snapshot: BtcSnapshot | None,
         seconds_to_expiry: int,
         time_elapsed_in_candle_s: int = 0,
+        btc_log_return_since_candle_open: float = 0.0,
     ) -> EvidencePacket:
         midpoint = features.mid_yes or candidate.implied_probability
         btc_price = btc_snapshot.price if btc_snapshot else 0.0
@@ -119,6 +120,7 @@ class ResearchEngine:
             realized_vol_30m=realized_vol_30m,
             time_elapsed_in_candle_s=time_elapsed_in_candle_s,
             btc_log_return_vs_strike=log_return_vs_strike,
+            btc_log_return_since_candle_open=btc_log_return_since_candle_open,
         )
 
     @staticmethod

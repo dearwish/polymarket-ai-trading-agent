@@ -76,6 +76,41 @@ def test_positive_drift_biases_fair_above_half(tmp_path: Path) -> None:
     assert assessment.fair_probability > 0.5
 
 
+def test_candle_open_log_return_takes_precedence_over_rolling_windows(tmp_path: Path) -> None:
+    """For "up or down" candle markets the scorer must use Δ_since_candle_open,
+    not a rolling 5m/15m window. When the candle-open field is populated it
+    should dominate the drift signal regardless of what the rolling fields say.
+    """
+    engine = QuantScoringEngine(_settings(tmp_path))
+    # Rolling returns say bearish (-0.01) but we've observed +0.01 since the
+    # market's own candle opened. The scorer must follow the candle-open signal
+    # and bias fair_yes ABOVE 0.5.
+    packet = _packet(
+        btc_log_return_5m=-0.01,
+        btc_log_return_15m=-0.01,
+        btc_log_return_since_candle_open=0.01,
+        realized_vol_30m=0.02,
+        seconds_to_expiry=600,
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.fair_probability > 0.5, (
+        f"fair_yes={assessment.fair_probability} — candle-open drift was positive, "
+        "but scorer still biased fair below 0.5 (likely using rolling windows)."
+    )
+
+    # Mirror case: rolling says bullish, but we've fallen -0.01 since candle open
+    # → fair_yes must be below 0.5.
+    packet = _packet(
+        btc_log_return_5m=0.01,
+        btc_log_return_15m=0.01,
+        btc_log_return_since_candle_open=-0.01,
+        realized_vol_30m=0.02,
+        seconds_to_expiry=600,
+    )
+    assessment = engine.score_market(packet)
+    assert assessment.fair_probability < 0.5
+
+
 def test_negative_drift_biases_fair_below_half(tmp_path: Path) -> None:
     engine = QuantScoringEngine(_settings(tmp_path))
     packet = _packet(btc_log_return_15m=-0.01, realized_vol_30m=0.02, seconds_to_expiry=1800)

@@ -33,11 +33,18 @@ class BtcState:
 
     def __init__(
         self,
-        max_samples: int = 2048,
+        max_samples: int = 8192,
         vol_halflife_seconds: float = 300.0,
+        min_record_interval_seconds: float = 1.0,
     ) -> None:
         self._samples: deque[tuple[datetime, float]] = deque(maxlen=max_samples)
         self._vol_halflife_seconds = max(1.0, vol_halflife_seconds)
+        # Decimate incoming ticks so the deque covers meaningful TIME rather than
+        # just the most recent few seconds. At Binance's ~70 Hz raw feed a 2048
+        # deque used to hold only ~30s of history, which made longer-horizon
+        # look-ups (e.g. log-return since a 15-min candle opened) return ~0.
+        # With 1s decimation + 8192 slots we retain ~2.3h of BTC history.
+        self._min_record_interval_seconds = max(0.0, min_record_interval_seconds)
         self._ewma_var: float = 0.0
         self._ewma_initialized: bool = False
 
@@ -62,6 +69,13 @@ class BtcState:
             return
         ts = observed_at or _utc_now()
         previous = self._samples[-1] if self._samples else None
+        if previous is not None:
+            dt = (ts - previous[0]).total_seconds()
+            # Decimate: skip ticks that arrive closer than min_record_interval.
+            # We still update EWMA vol on skipped ticks below so variance stays
+            # responsive, but the deque itself only grows at the decimation rate.
+            if dt < self._min_record_interval_seconds:
+                return
         self._samples.append((ts, float(price)))
         if previous is None:
             return

@@ -91,10 +91,18 @@ class QuantScoringEngine:
         return float(self.settings.quant_default_vol_per_second)
 
     def _drift_log_return(self, packet: EvidencePacket) -> float:
-        # For threshold markets ("above $K"), use ln(S_now/K) as the drift signal
-        # so the model scores distance-to-strike rather than short-term momentum.
+        # Directional "Up or Down" candle markets: the right signal is the log
+        # return OBSERVED so far since the market's candle opened, not a rolling
+        # 5m/15m window. Using rolling windows is structurally wrong here — they
+        # measure "BTC now vs BTC N minutes ago" rather than "BTC now vs BTC at
+        # candle open", which is what P(close > open) depends on.
+        if packet.btc_log_return_since_candle_open != 0.0:
+            return float(packet.btc_log_return_since_candle_open)
+        # Threshold markets ("above $K"): distance-to-strike ln(S/K).
         if packet.btc_log_return_vs_strike != 0.0:
             return float(packet.btc_log_return_vs_strike)
+        # Fallback for backwards-compat + cases where candle-open history is
+        # not yet available (e.g. daemon just started, not enough BTC samples).
         horizon = float(self.settings.quant_drift_horizon_seconds)
         if horizon >= 600.0 and packet.btc_log_return_15m != 0.0:
             return float(packet.btc_log_return_15m)

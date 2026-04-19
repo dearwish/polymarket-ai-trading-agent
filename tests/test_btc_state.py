@@ -60,6 +60,22 @@ def test_btc_state_snapshot_exposes_all_horizons() -> None:
     assert snapshot.log_return_1m > 0.0
 
 
+def test_btc_state_decimates_sub_interval_ticks() -> None:
+    """High-frequency ticks (< min_record_interval_seconds apart) must be
+    dropped so the deque covers TIME not just the last N milliseconds."""
+    state = BtcState(max_samples=64, min_record_interval_seconds=1.0)
+    base = _ts(0.0)
+    # 10 ticks spaced 100ms apart within the same 1s window: only the first
+    # should be retained.
+    for i in range(10):
+        state.record(100.0 + i, base + timedelta(seconds=i * 0.1))
+    assert state.sample_count == 1
+    # A tick 1.5s later is past the interval → kept.
+    state.record(200.0, base + timedelta(seconds=1.5))
+    assert state.sample_count == 2
+    assert state.last_price == 200.0
+
+
 def test_btc_state_seconds_since_last_update() -> None:
     state = BtcState()
     state.record(100.0, _ts(0.0))

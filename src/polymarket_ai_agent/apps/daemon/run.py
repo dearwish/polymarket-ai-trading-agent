@@ -28,6 +28,17 @@ from polymarket_ai_agent.types import (
 
 logger = logging.getLogger(__name__)
 
+# Window length (in seconds) of each "Up or Down" candle-style family. Used to
+# reconstruct the candle-open timestamp from a market's end_date_iso so the
+# scorer can compute log(BTC_now / BTC_at_candle_open) — the drift the GBM
+# model actually needs for a close > open binary outcome. Threshold markets
+# (btc_daily_threshold) use ln(S/K) instead and are not in this map.
+_FAMILY_WINDOW_SECONDS: dict[str, int] = {
+    "btc_5m": 5 * 60,
+    "btc_15m": 15 * 60,
+    "btc_1h": 60 * 60,
+}
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -357,11 +368,20 @@ class DaemonRunner:
         features = state.features(now=now)
         btc_snapshot = self.btc_state.snapshot(now=now)
         tte_seconds = self._seconds_to_expiry(candidate.end_date_iso, now=now)
+        # Compute BTC's log-return since THIS market's candle opened so the
+        # scorer's GBM uses Δ_observed (correct) instead of a rolling window.
+        window_len = _FAMILY_WINDOW_SECONDS.get(self.settings.market_family, 0)
+        time_elapsed = max(0, window_len - tte_seconds) if window_len > 0 else 0
+        candle_open_log_return = 0.0
+        if time_elapsed > 0 and self.btc_state.sample_count > 1:
+            candle_open_log_return = self.btc_state.log_return_over(time_elapsed, now=now)
         packet = self.research.build_from_features(
             candidate=candidate,
             features=features,
             btc_snapshot=btc_snapshot,
             seconds_to_expiry=tte_seconds,
+            time_elapsed_in_candle_s=int(time_elapsed),
+            btc_log_return_since_candle_open=candle_open_log_return,
         )
         assessment = self.quant.score_market(packet)
         context = DecisionContext(

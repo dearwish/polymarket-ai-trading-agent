@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from polymarket_ai_agent.apps.daemon.run import DaemonConfig, DaemonRunner
@@ -135,15 +135,17 @@ def test_daemon_processes_ws_events_and_updates_state(tmp_path: Path) -> None:
             },
         ),
     ]
+    # Space the ticks ≥ 1s apart so BtcState's 1s decimation keeps each one.
+    now_utc = datetime.now(timezone.utc)
     btc_ticks = [
-        BtcTick(price=70000.0, observed_at=datetime.now(timezone.utc), source="aggTrade"),
-        BtcTick(price=70100.0, observed_at=datetime.now(timezone.utc), source="aggTrade"),
+        BtcTick(price=70000.0, observed_at=now_utc + timedelta(seconds=2), source="aggTrade"),
+        BtcTick(price=70100.0, observed_at=now_utc + timedelta(seconds=4), source="aggTrade"),
     ]
 
     market_stream = FakeMarketStream(events)
     btc_feed = FakeBtcFeed(
         btc_ticks,
-        rest_tick=BtcTick(price=69900.0, observed_at=datetime.now(timezone.utc), source="rest"),
+        rest_tick=BtcTick(price=69900.0, observed_at=now_utc, source="rest"),
     )
 
     runner = DaemonRunner(
