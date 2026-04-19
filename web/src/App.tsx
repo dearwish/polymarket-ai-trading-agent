@@ -413,7 +413,7 @@ function formatInstant(
   if (variant === "datetime" || variant === "time") {
     opts.hour = "2-digit";
     opts.minute = "2-digit";
-    if (variant === "time") opts.second = "2-digit";
+    opts.second = "2-digit";
   }
   try {
     return new Intl.DateTimeFormat("en-GB", opts).format(d);
