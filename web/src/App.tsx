@@ -71,6 +71,7 @@ type PortfolioSummaryPayload = {
 
 type ClosedPosition = {
   market_id: string;
+  order_id: string;
   side: string;
   size_usd: number;
   entry_price: number;
@@ -218,6 +219,9 @@ type DaemonHeartbeatPayload = {
     safety_stop_reason: string | null;
     market_family: string;
     active_market_ids: string[];
+    position_extras?: Record<string, { peak_price?: number; tranches_closed?: number; original_size_usd?: number }>;
+    paper_trailing_stop_pct?: number;
+    paper_trail_arm_pct?: number;
   } | null;
 };
 
@@ -880,13 +884,19 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradi
   );
 }
 
-function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonTicks }: { summary: PortfolioSummaryPayload | null; positions: ClosedPosition[]; openPositions: OpenPosition[]; equityCurve: EquityCurvePayload | null; daemonTicks: DaemonTickPayload[] }) {
+function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonTicks, heartbeat }: { summary: PortfolioSummaryPayload | null; positions: ClosedPosition[]; openPositions: OpenPosition[]; equityCurve: EquityCurvePayload | null; daemonTicks: DaemonTickPayload[]; heartbeat: DaemonHeartbeatPayload | null }) {
   const [timezone] = useLocalStorage<string>("display.timezone", BROWSER_TZ);
   const [timeFormat] = useLocalStorage<TimeFormat>("display.timeFormat", "24h");
   // Rebuild the lookup on every render so the Mark / Unrealized PnL cells
   // always reflect the freshest daemon_tick. With a handful of markets the
   // cost is negligible and avoids any reference-stability bail in useMemo.
   const marketLookup = buildMarketLookup(daemonTicks);
+  // Daemon-provided trail state (peak_price, etc.) + the trail settings so we
+  // can compute each open position's live trailing-stop level.
+  const hb = heartbeat?.heartbeat ?? null;
+  const positionExtras = hb?.position_extras ?? {};
+  const trailPct = hb?.paper_trailing_stop_pct ?? 0;
+  const trailArmPct = hb?.paper_trail_arm_pct ?? 0;
   // Force the Polymarket embed iframes to refresh every 30s — their chart is
   // rendered once at load and doesn't update client-side, so we remount to
   // pull a fresh snapshot. Cachebuster query string defeats the iframe cache.
@@ -975,6 +985,7 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                   <th>Entry</th>
                   <th>Mark</th>
                   <th>Unrealized PnL</th>
+                  <th>Trail Stop</th>
                   <th>Opened</th>
                   <th>Order ID</th>
                 </tr>
@@ -998,6 +1009,32 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                   } else {
                     unrealizedCell = <span style={{ color: "var(--muted)" }}>—</span>;
                   }
+                  // Live trailing-stop level: peak × (1 - trail_pct) once armed
+                  // (peak ≥ entry × (1 + arm_pct)). Until armed, trail cannot fire.
+                  let trailCell: ReactNode = <span style={{ color: "var(--muted)" }}>—</span>;
+                  const extras = positionExtras[position.market_id];
+                  if (trailPct > 0 && extras && extras.peak_price && position.entry_price > 0) {
+                    const peak = extras.peak_price;
+                    const armThreshold = position.entry_price * (1 + trailArmPct);
+                    const armed = peak >= armThreshold;
+                    if (armed) {
+                      const trailLevel = peak * (1 - trailPct);
+                      const trailPctFromEntry = (trailLevel - position.entry_price) / position.entry_price;
+                      const cls = trailPctFromEntry >= 0 ? "positive" : "negative";
+                      const sign = trailPctFromEntry >= 0 ? "+" : "";
+                      trailCell = (
+                        <span className={cls} title={`Peak ${peak.toFixed(4)} · armed at ${armThreshold.toFixed(4)}`}>
+                          {trailLevel.toFixed(4)} ({sign}{(trailPctFromEntry * 100).toFixed(1)}%)
+                        </span>
+                      );
+                    } else {
+                      trailCell = (
+                        <span style={{ color: "var(--muted)", fontSize: "12px" }} title={`Peak ${peak.toFixed(4)} · arms at ${armThreshold.toFixed(4)}`}>
+                          disarmed
+                        </span>
+                      );
+                    }
+                  }
                   return (
                     <tr key={position.order_id || `${position.market_id}-${position.opened_at}`}>
                       <td><MarketCell marketId={position.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
@@ -1006,6 +1043,7 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                       <td>{position.entry_price.toFixed(4)}</td>
                       <td>{mark !== null ? mark.toFixed(4) : <span style={{ color: "var(--muted)" }}>—</span>}</td>
                       <td>{unrealizedCell}</td>
+                      <td>{trailCell}</td>
                       <td style={{ whiteSpace: "nowrap", fontSize: "12px", color: "var(--muted)" }}>{position.opened_at.slice(11, 19)}</td>
                       <td style={{ fontSize: "12px", color: "var(--muted)" }}>{position.order_id || "n/a"}</td>
                     </tr>
@@ -1026,6 +1064,7 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
           <table>
             <thead>
               <tr>
+                <th>Trade ID</th>
                 <th>Market</th>
                 <th>Side</th>
                 <th>Size</th>
@@ -1035,16 +1074,26 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
               </tr>
             </thead>
             <tbody>
-              {[...positions].reverse().map((position) => (
-                <tr key={`${position.market_id}-${position.closed_at}`}>
-                  <td><MarketCell marketId={position.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
-                  <td>{position.side}</td>
-                  <td>{formatMoney(position.size_usd)}</td>
-                  <td className={position.realized_pnl >= 0 ? "positive" : "negative"}>{formatMoney(position.realized_pnl)}</td>
-                  <td>{formatMoney(position.cumulative_pnl)}</td>
-                  <td>{position.close_reason}</td>
-                </tr>
-              ))}
+              {[...positions].reverse().map((position) => {
+                const pnlPct = position.size_usd > 0 ? (position.realized_pnl / position.size_usd) : 0;
+                const pnlCls = position.realized_pnl >= 0 ? "positive" : "negative";
+                const sign = position.realized_pnl >= 0 ? "+" : "";
+                return (
+                  <tr key={position.order_id || `${position.market_id}-${position.closed_at}`}>
+                    <td style={{ fontSize: "12px", color: "var(--muted)" }} title={position.order_id}>
+                      {position.order_id ? (position.order_id.length > 22 ? `${position.order_id.slice(0, 22)}…` : position.order_id) : "n/a"}
+                    </td>
+                    <td><MarketCell marketId={position.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
+                    <td>{position.side}</td>
+                    <td>{formatMoney(position.size_usd)}</td>
+                    <td className={pnlCls}>
+                      {sign}{formatMoney(position.realized_pnl)} ({sign}{(pnlPct * 100).toFixed(1)}%)
+                    </td>
+                    <td>{formatMoney(position.cumulative_pnl)}</td>
+                    <td>{position.close_reason}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {!positions.length && <div className="empty-state">No closed positions yet.</div>}
@@ -1736,7 +1785,7 @@ export default function App() {
       case "orders":
         return <OrdersPage liveOrders={state.liveOrders} liveTrades={state.liveTrades} liveActivity={state.liveActivity} paperActivity={state.paperActivity} tradingMode={state.status?.trading_mode ?? "paper"} daemonTicks={state.daemonTicks} />;
       case "portfolio":
-        return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} openPositions={state.openPositions?.positions ?? []} equityCurve={state.equityCurve} daemonTicks={state.daemonTicks} />;
+        return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} openPositions={state.openPositions?.positions ?? []} equityCurve={state.equityCurve} daemonTicks={state.daemonTicks} heartbeat={state.daemonHeartbeat} />;
       case "events":
         return <EventsPage events={state.recentEvents} report={state.report} />;
       case "settings":

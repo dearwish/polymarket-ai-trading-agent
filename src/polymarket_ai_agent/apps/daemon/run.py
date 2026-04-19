@@ -690,6 +690,11 @@ class DaemonRunner:
                     "auth_readonly_ready": auth,
                     "safety_stop_reason": self.metrics.safety_stop_reason,
                     "market_family": self.settings.market_family,
+                    # Per-open-position trail state. Lets the dashboard render the
+                    # live trailing-stop level alongside the Mark column.
+                    "position_extras": {mid: dict(extras) for mid, extras in self._position_extras.items()},
+                    "paper_trailing_stop_pct": float(self.settings.paper_trailing_stop_pct),
+                    "paper_trail_arm_pct": float(self.settings.paper_trail_arm_pct),
                 }
                 await asyncio.to_thread(self.heartbeat.write, self.metrics, extra)
             except Exception as exc:

@@ -493,6 +493,7 @@ def create_app(
             items.append(
                 {
                     "market_id": position.market_id,
+                    "order_id": position.order_id,
                     "side": position.side.value,
                     "size_usd": position.size_usd,
                     "entry_price": position.entry_price,

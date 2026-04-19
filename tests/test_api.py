@@ -140,6 +140,7 @@ class StubService:
                     (),
                     {
                         "market_id": "123",
+                        "order_id": "paper-order-000001",
                         "side": type("Side", (), {"value": "YES"})(),
                         "size_usd": 10.0,
                         "entry_price": 0.4,
