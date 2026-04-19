@@ -1115,7 +1115,7 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                     } else {
                       trailCell = (
                         <span style={{ color: "var(--muted)", fontSize: "12px" }} title={`Peak ${peak.toFixed(4)} · arms at ${armThreshold.toFixed(4)}`}>
-                          disarmed
+                          N/A
                         </span>
                       );
                     }
