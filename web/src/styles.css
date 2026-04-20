@@ -411,6 +411,23 @@ th {
   cursor: pointer;
 }
 
+.event-entry-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.toggle-button.icon-button {
+  padding: 6px 10px;
+  min-width: 32px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.toggle-button.icon-button:hover {
+  background: var(--panel-subtle, rgba(255, 255, 255, 0.04));
+}
+
 .event-preview {
   margin: 0;
   white-space: pre-wrap;

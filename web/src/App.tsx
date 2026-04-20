@@ -932,7 +932,33 @@ function EventEntry({
   defaultExpanded?: boolean;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [copied, setCopied] = useState(false);
   const preview = content.length > 180 ? `${content.slice(0, 180)}...` : content;
+
+  const handleCopy = async () => {
+    // Try the async Clipboard API first; fall back to a hidden textarea for
+    // non-HTTPS dev origins where navigator.clipboard is undefined.
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = content;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Swallow — the button text flips back on the next render and the user
+      // can retry; surfacing an error dialog for a copy action is worse UX.
+    }
+  };
+
   return (
     <li className="event-entry">
       <div className="event-entry-header">
@@ -940,9 +966,20 @@ function EventEntry({
           <strong>{title}</strong>
           <div className="event-time">{timestamp}</div>
         </div>
-        <button type="button" className="toggle-button" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? "Collapse" : "Expand"}
-        </button>
+        <div className="event-entry-actions">
+          <button
+            type="button"
+            className="toggle-button icon-button"
+            onClick={handleCopy}
+            title={copied ? "Copied!" : "Copy JSON"}
+            aria-label="Copy JSON to clipboard"
+          >
+            {copied ? "✓" : "⧉"}
+          </button>
+          <button type="button" className="toggle-button" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? "Collapse" : "Expand"}
+          </button>
+        </div>
       </div>
       <pre className="event-preview">{expanded ? content : preview}</pre>
     </li>
