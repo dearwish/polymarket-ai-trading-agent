@@ -71,6 +71,7 @@ class ResearchEngine:
         seconds_to_expiry: int,
         time_elapsed_in_candle_s: int = 0,
         btc_log_return_since_candle_open: float = 0.0,
+        is_pre_market: bool = False,
     ) -> EvidencePacket:
         midpoint = features.mid_yes or candidate.implied_probability
         btc_price = btc_snapshot.price if btc_snapshot else 0.0
@@ -129,6 +130,7 @@ class ResearchEngine:
             btc_log_return_1h=btc_return_1h,
             btc_log_return_4h=btc_return_4h,
             btc_log_return_24h=btc_return_24h,
+            is_pre_market=is_pre_market,
         )
 
     @staticmethod

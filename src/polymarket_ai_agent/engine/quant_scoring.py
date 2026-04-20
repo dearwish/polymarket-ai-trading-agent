@@ -134,6 +134,13 @@ class QuantScoringEngine:
         return float(self.settings.quant_default_vol_per_second)
 
     def _drift_log_return(self, packet: EvidencePacket) -> float:
+        # Pre-market: the market was discovered before its candle opened.
+        # Rolling 5m/15m returns measure the wrong thing here (they'd inject
+        # a phantom edge from before-window price action that has no bearing
+        # on this candle's close-vs-open outcome), so return 0 — scorer
+        # falls back to fair = 0.5 plus the imbalance tilt only.
+        if packet.is_pre_market:
+            return 0.0
         # Directional "Up or Down" candle markets: the right signal is the log
         # return OBSERVED so far since the market's candle opened, not a rolling
         # 5m/15m window. Using rolling windows is structurally wrong here — they
@@ -144,8 +151,10 @@ class QuantScoringEngine:
         # Threshold markets ("above $K"): distance-to-strike ln(S/K).
         if packet.btc_log_return_vs_strike != 0.0:
             return float(packet.btc_log_return_vs_strike)
-        # Fallback for backwards-compat + cases where candle-open history is
-        # not yet available (e.g. daemon just started, not enough BTC samples).
+        # In-candle cold-start: candle has opened but the BTC buffer hasn't
+        # accumulated enough samples to reconstruct the candle-open return.
+        # The rolling 5m/15m window is a reasonable stand-in here — it at
+        # least reflects recent BTC direction.
         horizon = float(self.settings.quant_drift_horizon_seconds)
         if horizon >= 600.0 and packet.btc_log_return_15m != 0.0:
             return float(packet.btc_log_return_15m)

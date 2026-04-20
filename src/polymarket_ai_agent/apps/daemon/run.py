@@ -386,6 +386,11 @@ class DaemonRunner:
         # scorer's GBM uses Δ_observed (correct) instead of a rolling window.
         window_len = _FAMILY_WINDOW_SECONDS.get(self.settings.market_family, 0)
         time_elapsed = max(0, window_len - tte_seconds) if window_len > 0 else 0
+        # Pre-market: the market was discovered before its candle opens (TTE
+        # still larger than the window). Rolling 5m/15m returns must not
+        # stand in for the candle-open drift here — they aren't predictive
+        # of this candle's close-vs-open direction.
+        is_pre_market = window_len > 0 and tte_seconds > window_len
         candle_open_log_return = 0.0
         if time_elapsed > 0 and self.btc_state.sample_count > 1:
             candle_open_log_return = self.btc_state.log_return_over(time_elapsed, now=now)
@@ -396,6 +401,7 @@ class DaemonRunner:
             seconds_to_expiry=tte_seconds,
             time_elapsed_in_candle_s=int(time_elapsed),
             btc_log_return_since_candle_open=candle_open_log_return,
+            is_pre_market=is_pre_market,
         )
         assessment = self.quant.score_market(packet)
         shadow_assessment = self.quant.score_shadow(packet)

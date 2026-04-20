@@ -80,6 +80,26 @@ def test_fair_value_is_neutral_without_drift_or_imbalance(tmp_path: Path) -> Non
     assert assessment.suggested_side == SuggestedSide.ABSTAIN
 
 
+def test_pre_market_ignores_rolling_returns(tmp_path: Path) -> None:
+    """When the candle hasn't opened yet, rolling 5m/15m returns must not
+    stand in for the candle-open drift. Prior behaviour: huge edges at
+    discovery time, all dropped by the candle-window filter. New behaviour:
+    fair = 0.5 + imbalance tilt only.
+    """
+    engine = QuantScoringEngine(_settings(tmp_path))
+    packet = _packet(
+        btc_log_return_15m=0.01,
+        btc_log_return_5m=0.01,
+        realized_vol_30m=0.02,
+        seconds_to_expiry=1800,
+        is_pre_market=True,
+    )
+    assessment = engine.score_market(packet)
+    assert abs(assessment.fair_probability - 0.5) < 1e-6
+    # Without an imbalance tilt, no positive edge → ABSTAIN.
+    assert assessment.suggested_side == SuggestedSide.ABSTAIN
+
+
 def test_positive_drift_biases_fair_above_half(tmp_path: Path) -> None:
     engine = QuantScoringEngine(_settings(tmp_path))
     packet = _packet(btc_log_return_15m=0.01, realized_vol_30m=0.02, seconds_to_expiry=1800)

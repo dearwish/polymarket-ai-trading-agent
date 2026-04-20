@@ -211,6 +211,7 @@ WS_SSL_VERIFY=true  # set false if a proxy/VPN presents a self-signed cert
 - expiry-risk tiers configurable via `QUANT_HIGH_EXPIRY_RISK_SECONDS` / `QUANT_MEDIUM_EXPIRY_RISK_SECONDS`
 - the `ScoringEngine.OpenRouter` path is preserved but now returns the same per-side edge fields
 - every tick exposes `reasons_to_abstain` / `reasons_for_trade` so the dashboard can show the exact gate that fired instead of inferring it
+- **pre-market drift zero** — when a candle-family market is discovered before its candle opens (`seconds_to_expiry > window_length`), the daemon sets `EvidencePacket.is_pre_market=True` and the scorer zeros out the drift signal. Rolling 5m/15m returns are not predictive of this candle's close-vs-open direction; using them was producing phantom 20–25% edges on fresh markets that the candle-window filter then had to discard every time. Fair collapses to `0.5 + imbalance_tilt` so pre-market edges are bounded by `QUANT_IMBALANCE_TILT`.
 
 ### Regime gates
 

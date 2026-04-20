@@ -109,6 +109,12 @@ class EvidencePacket:
     # we haven't observed enough BTC history or the window hasn't started.
     btc_log_return_since_candle_open: float = 0.0
     time_elapsed_in_candle_s: int = 0
+    # Pre-market: candle family market whose candle hasn't opened yet
+    # (``seconds_to_expiry`` exceeds the family window length). The scorer
+    # must not use rolling 5m/15m returns here — they're not predictive of
+    # this candle's close-vs-open direction, and the edges they produce have
+    # historically been the worst-performing bucket on the dashboard.
+    is_pre_market: bool = False
     # Coarse UTC session tag (asia/eu/us/off) derived from the BTC snapshot's
     # observed_at. Instrumentation-only today — logged in daemon_tick so we can
     # stratify hit-rate / Brier by session before wiring it into the scorer.
