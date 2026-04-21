@@ -545,6 +545,21 @@ function formatPct(value: number | null | undefined): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+// Near resolution one side of the book drains — ask=0 means "no sellers",
+// not "0¢". Prefer midpoint; fall back to whichever side is non-zero so the
+// pill reflects where the market is actually trading.
+function formatCentsFromBook(
+  mid: number | null | undefined,
+  bid: number | null | undefined,
+  ask: number | null | undefined,
+): string {
+  const candidates = [mid, ask, bid];
+  for (const v of candidates) {
+    if (typeof v === "number" && v > 0) return `${Math.round(v * 100)}¢`;
+  }
+  return "—";
+}
+
 function formatDuration(totalSeconds: number | null | undefined): string {
   if (totalSeconds === null || totalSeconds === undefined) return "n/a";
   const seconds = Math.max(0, Math.floor(totalSeconds));
@@ -1478,14 +1493,16 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                       <strong>{question}</strong>
                     </figcaption>
                     {/* Our own read-only Up/Down price row, sourced from the
-                        latest daemon_tick. Shown as ¢ to match Polymarket's
-                        own formatting. */}
+                        latest daemon_tick. Prefer the midpoint; fall back to
+                        the non-zero side of the book when one side is empty
+                        (common near resolution — "ask_yes=0" means no sellers,
+                        not a 0¢ price). */}
                     <div className="polymarket-price-row">
-                      <span className="price-pill price-up" title="Daemon-reported YES ask">
-                        ▲ Up {typeof tick?.ask_yes === "number" ? `${Math.round(tick.ask_yes * 100)}¢` : "—"}
+                      <span className="price-pill price-up" title="Daemon-reported YES price">
+                        ▲ Up {formatCentsFromBook(tick?.mid_yes, tick?.bid_yes, tick?.ask_yes)}
                       </span>
-                      <span className="price-pill price-down" title="Daemon-reported NO ask">
-                        ▼ Down {typeof tick?.ask_no === "number" ? `${Math.round(tick.ask_no * 100)}¢` : "—"}
+                      <span className="price-pill price-down" title="Daemon-reported NO price">
+                        ▼ Down {formatCentsFromBook(tick?.mid_no, tick?.bid_no, tick?.ask_no)}
                       </span>
                     </div>
                   </figure>
