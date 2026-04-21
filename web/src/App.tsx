@@ -1443,7 +1443,7 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                     </div>
                   );
                 }
-                const src = `https://embed.polymarket.com/market?market=${encodeURIComponent(slug)}&theme=dark&liveactivity=true&border=true&creator=0x43424Ed47ec4e4aC737534bea1DFd5d992B34732-1756591618869&height=300${embedReloadKey ? `&_r=${embedReloadKey}` : ""}`;
+                const src = `https://embed.polymarket.com/market?market=${encodeURIComponent(slug)}&theme=dark&liveactivity=true&buttons=false&border=true&creator=0x43424Ed47ec4e4aC737534bea1DFd5d992B34732-1756591618869&height=300${embedReloadKey ? `&_r=${embedReloadKey}` : ""}`;
                 const question = tick?.question ?? market_id;
                 return (
                   <figure
@@ -1455,13 +1455,16 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                     itemType="https://schema.org/WebPage"
                     style={{ position: "relative", display: "inline-block", margin: 0 }}
                   >
+                    {/* buttons=false on the embed URL hides Polymarket's own
+                        trade buttons (they showed stale prices); we render
+                        our own read-only price row below. */}
                     <iframe
                       key={embedReloadKey}
                       title={`${question} — Polymarket Prediction Market`}
                       src={src}
                       width={400}
                       height={300}
-                      style={{ border: "none" }}
+                      style={{ border: "none", display: "block" }}
                       loading="lazy"
                     />
                     <a
@@ -1474,6 +1477,17 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                     <figcaption style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap", border: 0 }}>
                       <strong>{question}</strong>
                     </figcaption>
+                    {/* Our own read-only Up/Down price row, sourced from the
+                        latest daemon_tick. Shown as ¢ to match Polymarket's
+                        own formatting. */}
+                    <div className="polymarket-price-row">
+                      <span className="price-pill price-up" title="Daemon-reported YES ask">
+                        ▲ Up {typeof tick?.ask_yes === "number" ? `${Math.round(tick.ask_yes * 100)}¢` : "—"}
+                      </span>
+                      <span className="price-pill price-down" title="Daemon-reported NO ask">
+                        ▼ Down {typeof tick?.ask_no === "number" ? `${Math.round(tick.ask_no * 100)}¢` : "—"}
+                      </span>
+                    </div>
                   </figure>
                 );
               })}
