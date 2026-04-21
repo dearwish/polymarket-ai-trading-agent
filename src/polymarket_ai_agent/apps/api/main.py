@@ -415,10 +415,12 @@ def create_app(
 
     @app.get("/api/decisions/recent")
     def recent_decisions(limit: int = Query(50, ge=1, le=200), service: AgentService = Depends(service_factory)) -> dict:
+        # read_recent_events returns oldest→newest; take the TAIL so the top
+        # of Signal History reflects the latest tick, not the newest-of-oldest.
         events = [e for e in service.journal.read_recent_events(limit=limit * 6) if e["event_type"] == "daemon_tick"]
         return {
-            "count": len(events[:limit]),
-            "decisions": events[:limit],
+            "count": len(events[-limit:]),
+            "decisions": events[-limit:],
         }
 
     @app.get("/api/paper/activity")
