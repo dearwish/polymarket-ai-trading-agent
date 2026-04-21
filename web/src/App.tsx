@@ -859,7 +859,7 @@ function OverviewPage({ state }: { state: DashboardState }) {
   );
 }
 
-function DecisionsPage({ decisions }: { decisions: DecisionItem[] }) {
+function DecisionsPage({ decisions, settings }: { decisions: DecisionItem[]; settings: SettingsPayload | null }) {
   const { timezone, timeFormat } = useDisplayPrefs();
   return (
     <section className="panel">
@@ -895,11 +895,27 @@ function DecisionsPage({ decisions }: { decisions: DecisionItem[] }) {
                 const conf = typeof p.confidence === "number" ? p.confidence : null;
                 const tte = typeof p.seconds_to_expiry === "number" ? p.seconds_to_expiry : null;
                 const question = typeof p.question === "string" ? p.question : String(p.market_id ?? "");
+                // Reason tooltip: same text the Portfolio → Last Signal table
+                // shows. deriveDecisionReason prefers the scorer's verbatim
+                // reasons_to_abstain/reasons_for_trade when present, falling
+                // back to a live-threshold heuristic for older ticks.
+                const reasonTooltip = deriveDecisionReason(
+                  p as unknown as DaemonTickPayload,
+                  settings?.values,
+                );
                 return (
                   <tr key={`${item.logged_at}-${index}`}>
                     <td style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: "12px" }}>{formatInstant(item.logged_at, timezone, timeFormat, "time")}</td>
                     <td title={question}>{question.length > 42 ? `${question.slice(0, 42)}…` : question}</td>
-                    <td><span className={sideClass}>{side || "n/a"}</span></td>
+                    <td>
+                      <span
+                        className={sideClass}
+                        title={reasonTooltip}
+                        style={{ cursor: "help" }}
+                      >
+                        {side || "n/a"}
+                      </span>
+                    </td>
                     <td>{fair !== null ? `${(fair * 100).toFixed(1)}%` : "n/a"}</td>
                     <td className={edgeYes !== null && edgeYes > 0 ? "positive" : edgeYes !== null ? "negative" : ""}>
                       {edgeYes !== null ? `${edgeYes >= 0 ? "+" : ""}${(edgeYes * 100).toFixed(2)}%` : "n/a"}
@@ -2123,7 +2139,7 @@ export default function App() {
   const currentView = useMemo(() => {
     switch (activeView) {
       case "decisions":
-        return <DecisionsPage decisions={state.recentDecisions} />;
+        return <DecisionsPage decisions={state.recentDecisions} settings={state.settings} />;
       case "orders":
         return <OrdersPage liveOrders={state.liveOrders} liveTrades={state.liveTrades} liveActivity={state.liveActivity} paperActivity={state.paperActivity} tradingMode={state.status?.trading_mode ?? "paper"} daemonTicks={state.daemonTicks} />;
       case "portfolio":
