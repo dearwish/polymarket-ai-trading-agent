@@ -503,15 +503,23 @@ def daemon(
 ) -> None:
     """Run the event-driven market-data daemon (Phase 1: read-only feeds)."""
     try:
-        # AgentService runs migrations on construction; re-resolve effective
-        # settings (.env + DB overrides) AFTER that so baseline rows written
-        # during migration are visible, then rebuild the service on the
-        # effective settings so all engines see the same coherent config.
+        # Migrations run explicitly before the service so (a) the applied
+        # list surfaces as the migrations_applied journal event on first
+        # boot and (b) get_effective_settings() below sees the freshly
+        # seeded baseline. Constructing AgentService once keeps the
+        # engines and self.settings coherent.
         from polymarket_ai_agent.config import get_effective_settings
+        from polymarket_ai_agent.engine.migrations import MigrationRunner
 
-        service = AgentService(get_settings())
+        base = get_settings()
+        applied = MigrationRunner(base.db_path).run()
         effective = get_effective_settings()
         service = AgentService(effective)
+        # AgentService's own migration call is a no-op once the schema is
+        # in place; carry the original applied list through so the daemon
+        # journals it exactly once on fresh boots.
+        if applied:
+            service.migrations_applied = applied
         run_daemon(effective, service, duration_seconds=duration_seconds or None)
     except Exception as exc:
         _handle_operator_error(exc)
