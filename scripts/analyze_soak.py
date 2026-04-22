@@ -23,6 +23,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +88,31 @@ class ClosedPositionRecord:
 # Journal reading
 # ---------------------------------------------------------------------------
 
-def load_closed_positions(events_path: Path) -> list[ClosedPositionRecord]:
+def _parse_ts(ts: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _in_window(ts_str: str, since: datetime | None, until: datetime | None) -> bool:
+    if since is None and until is None:
+        return True
+    dt = _parse_ts(ts_str)
+    if dt is None:
+        return True
+    if since is not None and dt < since:
+        return False
+    if until is not None and dt > until:
+        return False
+    return True
+
+
+def load_closed_positions(
+    events_path: Path,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[ClosedPositionRecord]:
     """Parse position_closed events so --hold-to-expiry can attribute per-trade
     realized P&L to a side + entry price without a DB join."""
     out: list[ClosedPositionRecord] = []
@@ -101,6 +126,8 @@ def load_closed_positions(events_path: Path) -> list[ClosedPositionRecord]:
             except json.JSONDecodeError:
                 continue
             if record.get("event_type") != "position_closed":
+                continue
+            if not _in_window(record.get("logged_at", ""), since, until):
                 continue
             p = record.get("payload", {})
             try:
@@ -121,7 +148,11 @@ def load_closed_positions(events_path: Path) -> list[ClosedPositionRecord]:
     return out
 
 
-def load_ticks(events_path: Path) -> dict[str, MarketSummary]:
+def load_ticks(
+    events_path: Path,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict[str, MarketSummary]:
     summaries: dict[str, MarketSummary] = {}
     with events_path.open() as fh:
         for line in fh:
@@ -133,6 +164,8 @@ def load_ticks(events_path: Path) -> dict[str, MarketSummary]:
             except json.JSONDecodeError:
                 continue
             if record.get("event_type") != "daemon_tick":
+                continue
+            if not _in_window(record.get("logged_at", ""), since, until):
                 continue
             p = record.get("payload", {})
             market_id = str(p.get("market_id", ""))
@@ -559,6 +592,16 @@ def main() -> None:
         help="Additive US-session bias for retro-shadow (default: 0.0)",
     )
     parser.add_argument(
+        "--since",
+        default=None,
+        help="Only include ticks logged at or after this ISO timestamp (e.g. 2026-04-21T05:52Z)",
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help="Only include ticks logged at or before this ISO timestamp (e.g. 2026-04-21T09:59Z)",
+    )
+    parser.add_argument(
         "--settings-timeline",
         action="store_true",
         help="Print chronological settings_changes from the DB and exit",
@@ -574,17 +617,30 @@ def main() -> None:
         _print_settings_timeline(Path(args.db))
         return
 
+    since: datetime | None = _parse_ts(args.since) if args.since else None
+    until: datetime | None = _parse_ts(args.until) if args.until else None
+    if since and since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    if until and until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+
     events_path = Path(args.events)
     if not events_path.exists():
         print(f"Events file not found: {events_path}", file=sys.stderr)
         sys.exit(1)
 
-    summaries = load_ticks(events_path)
+    window_note = ""
+    if since or until:
+        window_note = f"  window: {since.isoformat() if since else '—'} → {until.isoformat() if until else '—'}\n"
+
+    summaries = load_ticks(events_path, since=since, until=until)
     print(f"Loaded {sum(len(ms.ticks) for ms in summaries.values())} daemon_tick events across {len(summaries)} markets")
+    if window_note:
+        print(window_note, end="")
 
     closed_positions: list[ClosedPositionRecord] = []
     if args.hold_to_expiry:
-        closed_positions = load_closed_positions(events_path)
+        closed_positions = load_closed_positions(events_path, since=since, until=until)
         print(f"Loaded {len(closed_positions)} position_closed events")
 
     if not summaries:
