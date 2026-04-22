@@ -1284,10 +1284,13 @@ def test_daemon_multi_strategy_opens_per_strategy_positions(tmp_path: Path) -> N
     assert len(positions) == 2
 
 
-def test_daemon_multi_strategy_adaptive_abstains_in_trend(tmp_path: Path) -> None:
-    """Adaptive scorer must stay out of a trending regime while fade
-    continues to trade. This is the phase-2 value prop: fewer trades
-    during the regimes the fade scorer historically loses in.
+def test_daemon_multi_strategy_adaptive_blocks_taker_in_trend(tmp_path: Path) -> None:
+    """Phase 3: adaptive flips from ABSTAIN to "follow with maker" in a
+    trending regime. It picks a side but zeros ``edge`` so the risk
+    engine's ``min_edge`` gate blocks any accidental taker entry. Until
+    the daemon's maker-order branch lands in P3.3, adaptive should still
+    result in zero open positions in a trend because the follow
+    assessment can't clear the taker gates.
     """
     from polymarket_ai_agent.apps.daemon.run import DecisionContext
     from polymarket_ai_agent.engine.btc_state import BtcSnapshot
@@ -1298,7 +1301,10 @@ def test_daemon_multi_strategy_adaptive_abstains_in_trend(tmp_path: Path) -> Non
         "daemon_auto_paper_execute": True,
         "max_position_usd": 10.0,
         "min_confidence": 0.0,
-        "min_edge": 0.0,
+        # min_edge > 0 so adaptive's follow-with-maker assessment (edge=0)
+        # is rejected by the risk engine's taker gate. Production also
+        # runs with min_edge > 0, so this mirrors real conditions.
+        "min_edge": 0.01,
         "max_spread": 0.10,
         "min_depth_usd": 0.0,
         "stale_data_seconds": 3600,
