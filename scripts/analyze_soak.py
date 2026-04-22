@@ -82,6 +82,7 @@ class ClosedPositionRecord:
     realized_pnl: float
     close_reason: str
     hold_seconds: float
+    strategy_id: str = "fade"
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,7 @@ def load_closed_positions(
                         realized_pnl=float(p.get("realized_pnl") or 0.0),
                         close_reason=str(p.get("close_reason", "")),
                         hold_seconds=float(p.get("hold_seconds") or 0.0),
+                        strategy_id=str(p.get("strategy_id") or "fade"),
                     )
                 )
             except (TypeError, ValueError):
@@ -402,6 +404,38 @@ def analyze_hold_to_expiry(
         print("\n  ▶ Stops and expiry are roughly equivalent in this sample.")
 
 
+def _print_strategy_breakdown(closed_positions: list[ClosedPositionRecord]) -> None:
+    """Side-by-side PnL / win-rate stats per strategy_id from position_closed
+    events. Skips the section when only one strategy is present (the numbers
+    would just duplicate the aggregate view).
+    """
+    if not closed_positions:
+        return
+    by_strategy: dict[str, list[ClosedPositionRecord]] = defaultdict(list)
+    for pos in closed_positions:
+        by_strategy[pos.strategy_id].append(pos)
+    if len(by_strategy) < 2:
+        return
+
+    print("\n=== Per-strategy breakdown (closed positions) ===")
+    print(
+        f"  {'strategy':<14s}  {'n':>4s}  {'total_pnl':>10s}  "
+        f"{'win_rate':>8s}  {'avg_hold_s':>10s}  {'avg_pnl':>8s}"
+    )
+    for strategy_id in sorted(by_strategy):
+        rows = by_strategy[strategy_id]
+        n = len(rows)
+        total_pnl = sum(r.realized_pnl for r in rows)
+        wins = sum(1 for r in rows if r.realized_pnl > 0.0)
+        win_rate = wins / n if n else float("nan")
+        avg_hold = sum(r.hold_seconds for r in rows) / n if n else 0.0
+        avg_pnl = total_pnl / n if n else 0.0
+        print(
+            f"  {strategy_id:<14s}  {n:>4d}  {total_pnl:>+10.4f}  "
+            f"{win_rate:>8.1%}  {avg_hold:>10.1f}  {avg_pnl:>+8.4f}"
+        )
+
+
 def analyze(
     summaries: dict[str, MarketSummary],
     min_ticks: int,
@@ -492,6 +526,9 @@ def analyze(
         print("  ~  Hit rate marginally positive — more data needed")
     else:
         print("  ✗  Hit rate ≤ 50% — model needs re-calibration before live trading")
+
+    if closed_positions is not None:
+        _print_strategy_breakdown(closed_positions)
 
     if hold_to_expiry and closed_positions is not None:
         analyze_hold_to_expiry(closed_positions, resolved)
@@ -638,9 +675,10 @@ def main() -> None:
     if window_note:
         print(window_note, end="")
 
-    closed_positions: list[ClosedPositionRecord] = []
-    if args.hold_to_expiry:
-        closed_positions = load_closed_positions(events_path, since=since, until=until)
+    # Always load closed positions — the per-strategy breakdown runs
+    # whenever multiple strategies emitted closes, not only on --hold-to-expiry.
+    closed_positions = load_closed_positions(events_path, since=since, until=until)
+    if args.hold_to_expiry or any(p.strategy_id != "fade" for p in closed_positions):
         print(f"Loaded {len(closed_positions)} position_closed events")
 
     if not summaries:
