@@ -137,11 +137,16 @@ class PortfolioEngine:
                 counts[table] = int(row[0] or 0)
         return counts
 
-    def get_account_state(self, mode: ExecutionMode, now: datetime | None = None) -> AccountState:
-        open_positions = self.list_open_positions()
-        realized_pnl = self.get_total_realized_pnl()
-        daily_realized_pnl = self.get_daily_realized_pnl(now=now)
-        rejected_orders = self.get_rejected_orders(now=now)
+    def get_account_state(
+        self,
+        mode: ExecutionMode,
+        now: datetime | None = None,
+        strategy_id: str | None = None,
+    ) -> AccountState:
+        open_positions = self.list_open_positions(strategy_id=strategy_id)
+        realized_pnl = self.get_total_realized_pnl(strategy_id=strategy_id)
+        daily_realized_pnl = self.get_daily_realized_pnl(now=now, strategy_id=strategy_id)
+        rejected_orders = self.get_rejected_orders(now=now, strategy_id=strategy_id)
         reserved = sum(position.size_usd for position in open_positions)
         exposure = self._compute_exposure(open_positions)
         return AccountState(
@@ -182,11 +187,14 @@ class PortfolioEngine:
             "total_exposure_usd": round(long_btc + short_btc, 6),
         }
 
-    def get_total_realized_pnl(self) -> float:
+    def get_total_realized_pnl(self, strategy_id: str | None = None) -> float:
+        sql = "select coalesce(sum(realized_pnl), 0.0) from positions where status = 'CLOSED'"
+        params: tuple = ()
+        if strategy_id is not None:
+            sql += " and strategy_id = ?"
+            params = (strategy_id,)
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            row = conn.execute(
-                "select coalesce(sum(realized_pnl), 0.0) from positions where status = 'CLOSED'"
-            ).fetchone()
+            row = conn.execute(sql, params).fetchone()
         return float(row[0] or 0.0)
 
     def get_consecutive_losses(self, limit: int = 100) -> int:
@@ -216,19 +224,23 @@ class PortfolioEngine:
             streak += 1
         return streak
 
-    def get_daily_realized_pnl(self, now: datetime | None = None) -> float:
+    def get_daily_realized_pnl(
+        self,
+        now: datetime | None = None,
+        strategy_id: str | None = None,
+    ) -> float:
         current = now or _utc_now()
+        sql = (
+            "select coalesce(sum(realized_pnl), 0.0) from positions "
+            "where status = 'CLOSED' and closed_at is not null "
+            "and substr(closed_at, 1, 10) = ?"
+        )
+        params: tuple = (current.date().isoformat(),)
+        if strategy_id is not None:
+            sql += " and strategy_id = ?"
+            params = params + (strategy_id,)
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            row = conn.execute(
-                """
-                select coalesce(sum(realized_pnl), 0.0)
-                from positions
-                where status = 'CLOSED'
-                  and closed_at is not null
-                  and substr(closed_at, 1, 10) = ?
-                """,
-                (current.date().isoformat(),),
-            ).fetchone()
+            row = conn.execute(sql, params).fetchone()
         return float(row[0] or 0.0)
 
     def record_execution(self, decision: TradeDecision, result: ExecutionResult) -> None:
@@ -237,8 +249,8 @@ class PortfolioEngine:
             conn.execute(
                 """
                 insert into order_attempts(
-                    market_id, success, counted_rejection, status, detail, recorded_at
-                ) values (?, ?, ?, ?, ?, ?)
+                    market_id, success, counted_rejection, status, detail, recorded_at, strategy_id
+                ) values (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision.market_id,
@@ -247,6 +259,7 @@ class PortfolioEngine:
                     result.status,
                     result.detail,
                     result.executed_at.isoformat(),
+                    decision.strategy_id,
                 ),
             )
             if result.mode == ExecutionMode.LIVE and result.order_id:
@@ -283,8 +296,8 @@ class PortfolioEngine:
                 """
                 insert into positions(
                     market_id, side, size_usd, entry_price, order_id, opened_at, status,
-                    close_reason, closed_at, exit_price, realized_pnl
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    close_reason, closed_at, exit_price, realized_pnl, strategy_id
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision.market_id,
@@ -298,6 +311,7 @@ class PortfolioEngine:
                     None,
                     0.0,
                     0.0,
+                    decision.strategy_id,
                 ),
             )
             conn.commit()
@@ -311,6 +325,7 @@ class PortfolioEngine:
         fill_price: float,
         filled_size_shares: float,
         filled_at: datetime | None = None,
+        strategy_id: str = "fade",
     ) -> PositionRecord | None:
         """Create or update a PositionRecord for a live order that just filled.
 
@@ -342,8 +357,8 @@ class PortfolioEngine:
                     """
                     insert into positions(
                         market_id, side, size_usd, entry_price, order_id, opened_at, status,
-                        close_reason, closed_at, exit_price, realized_pnl
-                    ) values (?, ?, ?, ?, ?, ?, 'OPEN', '', NULL, 0.0, 0.0)
+                        close_reason, closed_at, exit_price, realized_pnl, strategy_id
+                    ) values (?, ?, ?, ?, ?, ?, 'OPEN', '', NULL, 0.0, 0.0, ?)
                     """,
                     (
                         market_id,
@@ -352,6 +367,7 @@ class PortfolioEngine:
                         fill_price,
                         order_id,
                         timestamp.isoformat(),
+                        strategy_id,
                     ),
                 )
             conn.execute(
@@ -373,20 +389,25 @@ class PortfolioEngine:
             order_id=order_id,
             opened_at=timestamp,
             status="OPEN",
+            strategy_id=strategy_id,
         )
 
-    def get_rejected_orders(self, now: datetime | None = None) -> int:
+    def get_rejected_orders(
+        self,
+        now: datetime | None = None,
+        strategy_id: str | None = None,
+    ) -> int:
         current = now or _utc_now()
+        sql = (
+            "select count(*) from order_attempts "
+            "where counted_rejection = 1 and substr(recorded_at, 1, 10) = ?"
+        )
+        params: tuple = (current.date().isoformat(),)
+        if strategy_id is not None:
+            sql += " and strategy_id = ?"
+            params = params + (strategy_id,)
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            row = conn.execute(
-                """
-                select count(*)
-                from order_attempts
-                where counted_rejection = 1
-                  and substr(recorded_at, 1, 10) = ?
-                """,
-                (current.date().isoformat(),),
-            ).fetchone()
+            row = conn.execute(sql, params).fetchone()
         return int(row[0] or 0)
 
     def list_live_orders(self, limit: int = 50) -> list[dict]:
@@ -437,42 +458,60 @@ class PortfolioEngine:
     def is_terminal_live_order_status(cls, status: str) -> bool:
         return status.strip().upper() in cls.TERMINAL_LIVE_ORDER_STATUSES
 
-    def list_open_positions(self) -> list[PositionRecord]:
+    def list_open_positions(self, strategy_id: str | None = None) -> list[PositionRecord]:
+        sql = (
+            "select market_id, side, size_usd, entry_price, order_id, opened_at, status, "
+            "close_reason, closed_at, exit_price, realized_pnl, strategy_id "
+            "from positions where status = 'OPEN'"
+        )
+        params: tuple = ()
+        if strategy_id is not None:
+            sql += " and strategy_id = ?"
+            params = (strategy_id,)
+        sql += " order by opened_at asc"
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            rows = conn.execute(
-                """
-                select market_id, side, size_usd, entry_price, order_id, opened_at, status,
-                       close_reason, closed_at, exit_price, realized_pnl
-                from positions where status = 'OPEN'
-                order by opened_at asc
-                """
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [self._row_to_position(row) for row in rows]
 
-    def list_closed_positions(self, limit: int = 20) -> list[PositionRecord]:
+    def list_closed_positions(
+        self,
+        limit: int = 20,
+        strategy_id: str | None = None,
+    ) -> list[PositionRecord]:
+        sql = (
+            "select market_id, side, size_usd, entry_price, order_id, opened_at, status, "
+            "close_reason, closed_at, exit_price, realized_pnl, strategy_id "
+            "from positions where status = 'CLOSED'"
+        )
+        params: tuple = ()
+        if strategy_id is not None:
+            sql += " and strategy_id = ?"
+            params = (strategy_id,)
+        sql += " order by closed_at desc limit ?"
+        params = params + (limit,)
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            rows = conn.execute(
-                """
-                select market_id, side, size_usd, entry_price, order_id, opened_at, status,
-                       close_reason, closed_at, exit_price, realized_pnl
-                from positions where status = 'CLOSED'
-                order by closed_at desc
-                limit ?
-                """,
-                (limit,),
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [self._row_to_position(row) for row in rows]
 
-    def positions_due_for_close(self, ttl_seconds: int, now: datetime | None = None) -> list[PositionRecord]:
+    def positions_due_for_close(
+        self,
+        ttl_seconds: int,
+        now: datetime | None = None,
+        strategy_id: str | None = None,
+    ) -> list[PositionRecord]:
         current = now or _utc_now()
         due: list[PositionRecord] = []
-        for position in self.list_open_positions():
+        for position in self.list_open_positions(strategy_id=strategy_id):
             if current - position.opened_at >= timedelta(seconds=ttl_seconds):
                 due.append(position)
         return due
 
-    def get_open_position(self, market_id: str) -> PositionRecord | None:
-        return self._get_open_position(market_id)
+    def get_open_position(
+        self,
+        market_id: str,
+        strategy_id: str = "fade",
+    ) -> PositionRecord | None:
+        return self._get_open_position(market_id, strategy_id=strategy_id)
 
     def list_closed_tranches_for_order(self, base_order_id: str) -> list[PositionRecord]:
         """Return CLOSED tranche rows whose order_id starts with
@@ -489,7 +528,7 @@ class PortfolioEngine:
             rows = conn.execute(
                 """
                 select market_id, side, size_usd, entry_price, order_id, opened_at, status,
-                       close_reason, closed_at, exit_price, realized_pnl
+                       close_reason, closed_at, exit_price, realized_pnl, strategy_id
                 from positions
                 where status = 'CLOSED' and order_id like ?
                 order by closed_at asc
@@ -498,9 +537,16 @@ class PortfolioEngine:
             ).fetchall()
         return [self._row_to_position(row) for row in rows]
 
-    def close_position(self, market_id: str, exit_price: float, reason: str, now: datetime | None = None) -> PositionAction:
+    def close_position(
+        self,
+        market_id: str,
+        exit_price: float,
+        reason: str,
+        now: datetime | None = None,
+        strategy_id: str = "fade",
+    ) -> PositionAction:
         current = now or _utc_now()
-        position = self._get_open_position(market_id)
+        position = self._get_open_position(market_id, strategy_id=strategy_id)
         if not position:
             return PositionAction(market_id=market_id, action="NOOP", reason="Position not open.")
         pnl = self._compute_pnl(position, exit_price) - self._round_trip_fee(position.size_usd)
@@ -513,9 +559,9 @@ class PortfolioEngine:
                     closed_at = ?,
                     exit_price = ?,
                     realized_pnl = ?
-                where market_id = ? and status = 'OPEN'
+                where market_id = ? and status = 'OPEN' and strategy_id = ?
                 """,
-                (reason, current.isoformat(), exit_price, pnl, market_id),
+                (reason, current.isoformat(), exit_price, pnl, market_id, strategy_id),
             )
             conn.commit()
         return PositionAction(market_id=market_id, action="CLOSE", reason=reason)
@@ -527,6 +573,7 @@ class PortfolioEngine:
         exit_price: float,
         reason: str,
         now: datetime | None = None,
+        strategy_id: str = "fade",
     ) -> PositionAction:
         """Close a fraction (0 < f < 1) of an open position.
 
@@ -535,11 +582,13 @@ class PortfolioEngine:
         by the same fraction. fraction >= 1.0 falls back to a full close.
         """
         if fraction >= 1.0:
-            return self.close_position(market_id, exit_price, reason, now=now)
+            return self.close_position(
+                market_id, exit_price, reason, now=now, strategy_id=strategy_id
+            )
         if fraction <= 0.0:
             return PositionAction(market_id=market_id, action="NOOP", reason="fraction must be > 0")
         current = now or _utc_now()
-        position = self._get_open_position(market_id)
+        position = self._get_open_position(market_id, strategy_id=strategy_id)
         if not position:
             return PositionAction(market_id=market_id, action="NOOP", reason="Position not open.")
         closed_size = position.size_usd * fraction
@@ -552,16 +601,16 @@ class PortfolioEngine:
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             # Shrink the open row.
             conn.execute(
-                "update positions set size_usd = ? where market_id = ? and status = 'OPEN'",
-                (remaining_size, market_id),
+                "update positions set size_usd = ? where market_id = ? and status = 'OPEN' and strategy_id = ?",
+                (remaining_size, market_id, strategy_id),
             )
             # Insert the closed tranche as a new row.
             conn.execute(
                 """
                 insert into positions(
                     market_id, side, size_usd, entry_price, order_id, opened_at, status,
-                    close_reason, closed_at, exit_price, realized_pnl
-                ) values (?, ?, ?, ?, ?, ?, 'CLOSED', ?, ?, ?, ?)
+                    close_reason, closed_at, exit_price, realized_pnl, strategy_id
+                ) values (?, ?, ?, ?, ?, ?, 'CLOSED', ?, ?, ?, ?, ?)
                 """,
                 (
                     market_id,
@@ -574,21 +623,26 @@ class PortfolioEngine:
                     current.isoformat(),
                     exit_price,
                     closed_pnl,
+                    strategy_id,
                 ),
             )
             conn.commit()
         return PositionAction(market_id=market_id, action="PARTIAL_CLOSE", reason=reason)
 
-    def _get_open_position(self, market_id: str) -> PositionRecord | None:
+    def _get_open_position(
+        self,
+        market_id: str,
+        strategy_id: str = "fade",
+    ) -> PositionRecord | None:
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             row = conn.execute(
                 """
                 select market_id, side, size_usd, entry_price, order_id, opened_at, status,
-                       close_reason, closed_at, exit_price, realized_pnl
-                from positions where market_id = ? and status = 'OPEN'
+                       close_reason, closed_at, exit_price, realized_pnl, strategy_id
+                from positions where market_id = ? and status = 'OPEN' and strategy_id = ?
                 limit 1
                 """,
-                (market_id,),
+                (market_id, strategy_id),
             ).fetchone()
         return self._row_to_position(row) if row else None
 
@@ -662,6 +716,7 @@ class PortfolioEngine:
     @staticmethod
     def _row_to_position(row) -> PositionRecord:
         closed_at = datetime.fromisoformat(row[8]) if row[8] else None
+        strategy_id = str(row[11]) if len(row) > 11 and row[11] else "fade"
         return PositionRecord(
             market_id=str(row[0]),
             side=SuggestedSide(str(row[1])),
@@ -674,6 +729,7 @@ class PortfolioEngine:
             closed_at=closed_at,
             exit_price=float(row[9] or 0.0),
             realized_pnl=float(row[10] or 0.0),
+            strategy_id=strategy_id,
         )
 
     def _init_db(self) -> None:

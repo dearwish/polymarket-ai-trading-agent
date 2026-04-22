@@ -461,3 +461,66 @@ def test_portfolio_splits_active_and_terminal_live_orders(settings) -> None:
     assert engine.list_active_live_orders()[0]["order_id"] == "live-active"
     assert len(engine.list_terminal_live_orders()) == 1
     assert engine.list_terminal_live_orders()[0]["order_id"] == "live-terminal"
+
+
+def test_portfolio_isolates_positions_by_strategy(settings) -> None:
+    """Two scorers trading the same market maintain independent portfolios.
+
+    The phase-1 scaffolding for the adaptive-regime branch: same (market_id),
+    different strategy_id → two parallel positions that don't collide on
+    open, close, or aggregate PnL.
+    """
+    engine = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
+
+    fade = TradeDecision(
+        market_id="mkt-1",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=10.0,
+        limit_price=0.50,
+        rationale=["approved"],
+        rejected_by=[],
+        strategy_id="fade",
+    )
+    adaptive = TradeDecision(
+        market_id="mkt-1",
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.NO,
+        size_usd=10.0,
+        limit_price=0.50,
+        rationale=["approved"],
+        rejected_by=[],
+        strategy_id="adaptive",
+    )
+    fill = lambda order_id: ExecutionResult(
+        market_id="mkt-1",
+        success=True,
+        mode=ExecutionMode.PAPER,
+        order_id=order_id,
+        status="FILLED_PAPER",
+        detail="ok",
+        fill_price=0.50,
+    )
+
+    engine.record_execution(fade, fill("paper-1"))
+    engine.record_execution(adaptive, fill("paper-2"))
+
+    # Both positions coexist in the same market.
+    all_open = engine.list_open_positions()
+    assert len(all_open) == 2
+    assert {p.strategy_id for p in all_open} == {"fade", "adaptive"}
+
+    # Per-strategy filters return exactly one each.
+    fade_open = engine.list_open_positions(strategy_id="fade")
+    adaptive_open = engine.list_open_positions(strategy_id="adaptive")
+    assert len(fade_open) == 1 and fade_open[0].side == SuggestedSide.YES
+    assert len(adaptive_open) == 1 and adaptive_open[0].side == SuggestedSide.NO
+
+    # Closing one strategy's position must not touch the other.
+    engine.close_position("mkt-1", 0.80, "paper_take_profit", strategy_id="fade")
+    assert engine.get_open_position("mkt-1", strategy_id="fade") is None
+    assert engine.get_open_position("mkt-1", strategy_id="adaptive") is not None
+
+    # Per-strategy PnL reflects only that strategy's closed positions.
+    assert engine.get_total_realized_pnl(strategy_id="fade") > 0.0
+    assert engine.get_total_realized_pnl(strategy_id="adaptive") == 0.0

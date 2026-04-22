@@ -175,6 +175,7 @@ class TradeDecision:
     execution_style: ExecutionStyle = ExecutionStyle.FOK_TAKER
     post_only: bool = False
     decided_at: datetime = field(default_factory=utc_now)
+    strategy_id: str = "fade"
 
 
 @dataclass(slots=True)
@@ -207,6 +208,7 @@ class PositionRecord:
     closed_at: datetime | None = None
     exit_price: float = 0.0
     realized_pnl: float = 0.0
+    strategy_id: str = "fade"
 
 
 @dataclass(slots=True)
