@@ -56,6 +56,8 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     "paper_position_ttl_seconds": 60,
     "paper_entry_slippage_bps": 10.0,
     "paper_exit_slippage_bps": 10.0,
+    "paper_follow_limit_discount_bps": 50.0,
+    "paper_follow_maker_ttl_seconds": 300,
     "fee_bps": 0.0,
     # --- Quant scorer gates ---
     "quant_invert_drift": False,

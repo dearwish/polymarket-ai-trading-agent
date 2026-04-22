@@ -118,6 +118,14 @@ class Settings(BaseSettings):
     paper_position_ttl_seconds: int = 60
     paper_entry_slippage_bps: float = 10.0
     paper_exit_slippage_bps: float = 10.0
+    # Phase 3 adaptive-regime: maker-follow configuration for the adaptive
+    # scorer. When it sees a trending regime it places a resting limit a
+    # ``paper_follow_limit_discount_bps`` below mid on its side; if the book
+    # crosses that level within ``paper_follow_maker_ttl_seconds`` we treat
+    # it as filled. 50 bps / 300 s are initial defaults tuned for 15-minute
+    # BTC Up/Down markets — revisit after the first trending-regime soak.
+    paper_follow_limit_discount_bps: float = 50.0
+    paper_follow_maker_ttl_seconds: int = 300
 
     fee_bps: float = 0.0
     execution_maker_min_edge: float = 0.04
@@ -279,6 +287,22 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 10000,
         "step": 0.1,
+        "group": "paper",
+    },
+    "paper_follow_limit_discount_bps": {
+        "label": "Follow Maker Discount BPS",
+        "type": "number",
+        "min": 0,
+        "max": 10000,
+        "step": 1,
+        "group": "paper",
+    },
+    "paper_follow_maker_ttl_seconds": {
+        "label": "Follow Maker TTL (seconds)",
+        "type": "number",
+        "min": 0,
+        "max": 3600,
+        "step": 1,
         "group": "paper",
     },
     "paper_take_profit_pct": {
