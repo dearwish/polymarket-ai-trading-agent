@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Protocol
 
 from polymarket_ai_agent.apps.daemon.heartbeat import HeartbeatWriter
@@ -295,6 +295,23 @@ class DaemonRunner:
             if candidate.no_token_id:
                 asset_to_market[candidate.no_token_id] = candidate.market_id
                 asset_ids.add(candidate.no_token_id)
+        # Close paper positions whose market is not in the new active set.
+        # Checks ALL open positions (not just "dropped" ones) so orphans from a
+        # previous daemon session are caught on the first discovery cycle after restart.
+        # Only runs in paper mode — live positions are managed by the live executor.
+        if self.settings.daemon_auto_paper_execute:
+            all_open = await asyncio.to_thread(self.service.portfolio.list_open_positions)
+            for open_pos in all_open:
+                mid = open_pos.market_id
+                if mid not in new_candidates:
+                    cand = self._candidates.get(mid)
+                    if cand is None:
+                        try:
+                            cand = await asyncio.to_thread(self.service.polymarket.get_market, mid)
+                        except Exception as exc:
+                            logger.warning("Orphan close: could not fetch candidate for %s: %s", mid, exc)
+                    if cand is not None:
+                        await self._close_orphaned_position(mid, open_pos, cand)
         self._market_states = new_states
         self._candidates = new_candidates
         self._asset_to_market = asset_to_market
@@ -794,6 +811,76 @@ class DaemonRunner:
             "tranches_closed": float(tp_ladder_count),
             "original_size_usd": float(open_pos.size_usd) + closed_size,
         }
+
+    async def _close_orphaned_position(
+        self,
+        market_id: str,
+        open_pos: "Any",
+        old_candidate: MarketCandidate,
+    ) -> None:
+        """Force-close a paper position whose market dropped out of the active set.
+
+        Stamps the close at market_end_time − 45 s so the position appears to
+        have exited cleanly before the final-seconds noise band rather than at
+        an arbitrary future wall-clock time.
+        """
+        try:
+            expiry = datetime.fromisoformat(old_candidate.end_date_iso.replace("Z", "+00:00"))
+            close_time = min(expiry - timedelta(seconds=45), _utc_now())
+        except (ValueError, AttributeError):
+            close_time = _utc_now()
+
+        side = open_pos.side
+        fallback_price = (
+            1.0 - old_candidate.implied_probability
+            if side == SuggestedSide.NO
+            else old_candidate.implied_probability
+        )
+        exit_price = self._paper_exit_fill(market_id, side, float(open_pos.size_usd), fallback_price)
+
+        await asyncio.to_thread(
+            lambda: self.service.portfolio.close_position(
+                market_id, exit_price, "paper_orphan_close", now=close_time
+            )
+        )
+        self._position_extras.pop(market_id, None)
+        self._last_close_at[market_id] = _utc_now()
+
+        entry_price = float(open_pos.entry_price)
+        size_usd = float(open_pos.size_usd)
+        shares = size_usd / max(entry_price, 1e-6)
+        fee_bps = float(self.settings.fee_bps)
+        pnl_usd = (exit_price - entry_price) * shares - size_usd * (fee_bps / 10_000.0) * 2.0
+        pnl_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        opened_at = open_pos.opened_at
+        hold_seconds = (close_time - opened_at).total_seconds() if opened_at else 0.0
+        payload: dict[str, Any] = {
+            "market_id": market_id,
+            "question": old_candidate.question,
+            "slug": old_candidate.slug,
+            "end_date_iso": old_candidate.end_date_iso,
+            "side": side.value,
+            "size_usd": size_usd,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "realized_pnl": round(pnl_usd, 6),
+            "pnl_pct": round(pnl_pct, 6),
+            "close_reason": "paper_orphan_close",
+            "opened_at": opened_at.isoformat() if opened_at else None,
+            "closed_at": close_time.isoformat(),
+            "hold_seconds": round(hold_seconds, 3),
+            "tte_at_close_seconds": 45,
+            "fair_probability_at_close": None,
+            "edge_at_close": None,
+        }
+        await asyncio.to_thread(self.service.journal.log_event, "position_closed", payload)
+        logger.info(
+            "Orphan close: market %s dropped from active set; closed %s at %.4f (stamped %s).",
+            market_id,
+            side.value,
+            exit_price,
+            close_time.isoformat(),
+        )
 
     async def _finalize_paper_close(
         self,
