@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from polymarket_ai_agent.apps.daemon.run import DaemonConfig, DaemonRunner
+from polymarket_ai_agent.apps.daemon.run import DaemonConfig, DaemonMetrics, DaemonRunner
 from polymarket_ai_agent.config import Settings
 from polymarket_ai_agent.connectors.binance_ws import BtcTick
 from polymarket_ai_agent.connectors.polymarket_ws import MarketStreamEvent
@@ -1386,3 +1386,255 @@ def test_daemon_multi_strategy_adaptive_blocks_taker_in_trend(tmp_path: Path) ->
     # adaptive refuses.
     assert "fade" in strategies
     assert "adaptive" not in strategies
+
+
+def _follow_packet(market_id: str, bid_yes: float = 0.66, ask_yes: float = 0.68) -> "EvidencePacket":
+    """Trending-up packet with a liquid YES book — triggers adaptive
+    follow-with-maker on a YES buy.
+    """
+    from polymarket_ai_agent.types import EvidencePacket
+    return EvidencePacket(
+        market_id=market_id,
+        question="test",
+        resolution_criteria="-",
+        market_probability=0.65,
+        orderbook_midpoint=(bid_yes + ask_yes) / 2,
+        spread=ask_yes - bid_yes,
+        depth_usd=500.0,
+        seconds_to_expiry=600,
+        external_price=70000.0,
+        recent_price_change_bps=0.0,
+        recent_trade_count=0,
+        reasons_context=[],
+        citations=[],
+        bid_yes=bid_yes,
+        ask_yes=ask_yes,
+        bid_no=1.0 - ask_yes,
+        ask_no=1.0 - bid_yes,
+        btc_log_return_since_candle_open=0.003,
+        realized_vol_30m=0.002,
+        # Both HTF returns positive and above threshold → TRENDING_UP.
+        btc_log_return_1h=0.005,
+        btc_log_return_4h=0.008,
+        time_elapsed_in_candle_s=300,
+    )
+
+
+def _follow_settings(tmp_path: Path):
+    """Settings loose enough for the fade scorer to pick YES under the
+    hood; all filter gates disabled so adaptive's follow logic is what
+    gets tested, not the risk engine's veto.
+    """
+    return _settings(tmp_path).model_copy(update={
+        "daemon_auto_paper_execute": True,
+        "max_position_usd": 2.0,
+        "min_confidence": 0.0,
+        "min_edge": 0.01,
+        "max_spread": 0.10,
+        "min_depth_usd": 0.0,
+        "stale_data_seconds": 3600,
+        "max_concurrent_positions": 5,
+        "quant_trend_filter_enabled": False,
+        "quant_ofi_gate_enabled": False,
+        "quant_vol_regime_enabled": False,
+        "quant_min_entry_price": 0.0,
+        "min_candle_elapsed_seconds": 0,
+        "paper_entry_cooldown_seconds": 0,
+        "paper_follow_limit_discount_bps": 100.0,  # 1% below mid
+        "paper_follow_maker_ttl_seconds": 60,
+    })
+
+
+def _follow_runner_and_state(tmp_path: Path, candidate_id: str = "m-follow"):
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    settings = _follow_settings(tmp_path)
+    service = AgentService(settings)
+    candidate = _candidate(candidate_id, "yes-tok", "no-tok")
+    runner = DaemonRunner(
+        settings=settings,
+        service=service,
+        config=DaemonConfig(market_family=settings.market_family),
+        market_stream_factory=lambda url: FakeMarketStream([]),  # type: ignore[arg-type]
+        btc_feed_factory=lambda: FakeBtcFeed([]),  # type: ignore[arg-type]
+    )
+    state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    runner._market_states[candidate.market_id] = state
+    runner._candidates[candidate.market_id] = candidate
+    return runner, service, candidate, state
+
+
+def _apply_book(state, bid_yes: float, ask_yes: float) -> None:
+    state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [{"price": f"{bid_yes:.4f}", "size": "500"}],
+        "asks": [{"price": f"{ask_yes:.4f}", "size": "500"}],
+    })
+
+
+def _context_for_follow(state, candidate, packet):
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.btc_state import BtcSnapshot
+    btc = BtcSnapshot(
+        price=70000.0,
+        observed_at=datetime.now(timezone.utc),
+        log_return_10s=0.0, log_return_1m=0.0, log_return_5m=0.0,
+        log_return_15m=0.0, realized_vol_30m=0.002, sample_count=50,
+    )
+    assessment = _follow_assessment(candidate.market_id)
+    return DecisionContext(
+        market_id=candidate.market_id,
+        candidate=candidate,
+        features=state.features(),
+        btc_snapshot=btc,
+        assessment=assessment,
+        metrics=DaemonMetrics(),
+        packet=packet,
+    )
+
+
+def _follow_assessment(market_id: str) -> "MarketAssessment":
+    """A hand-built follow-with-maker assessment so the fade-path test
+    doesn't need to run the full scorer. Matches what AdaptiveScorer
+    returns in TRENDING_UP regime.
+    """
+    from polymarket_ai_agent.engine.adaptive_scoring import ADAPTIVE_FOLLOW_MAKER_TAG
+    from polymarket_ai_agent.types import MarketAssessment, SuggestedSide
+    return MarketAssessment(
+        market_id=market_id,
+        fair_probability=0.65,
+        confidence=0.0,
+        suggested_side=SuggestedSide.YES,
+        expiry_risk="LOW",
+        reasons_for_trade=["Regime TRENDING_UP: follow with maker"],
+        reasons_to_abstain=[],
+        edge=0.0,
+        raw_model_output=ADAPTIVE_FOLLOW_MAKER_TAG,
+        edge_yes=0.0,
+        edge_no=0.0,
+        fair_probability_no=0.35,
+        slippage_bps=10.0,
+    )
+
+
+def test_follow_maker_placed_on_first_tick(tmp_path: Path) -> None:
+    """First tick of a trending regime with no existing maker → daemon
+    parks a new paper-maker at the discounted mid. No position opens.
+    """
+    from polymarket_ai_agent.types import SuggestedSide
+    runner, service, candidate, state = _follow_runner_and_state(tmp_path)
+    _apply_book(state, bid_yes=0.66, ask_yes=0.68)
+    ctx = _context_for_follow(state, candidate, _follow_packet(candidate.market_id))
+
+    asyncio.run(runner._paper_execute_for_strategy(ctx, "adaptive"))
+
+    key = ("adaptive", candidate.market_id)
+    pending = runner._pending_makers.get(key)
+    assert pending is not None, "follow-maker must be parked on first tick"
+    assert pending.side == SuggestedSide.YES
+    # Mid = 0.67, 100 bps discount = 0.67 × 0.99 = 0.6633
+    assert abs(pending.limit_price - 0.6633) < 1e-4
+    assert service.portfolio.list_open_positions() == []
+
+
+def test_follow_maker_fills_when_ask_crosses(tmp_path: Path) -> None:
+    """Tick 1: parks a maker at 0.6633. Tick 2: the YES ask drops to
+    0.66 (pullback) which crosses our limit → maker fills as a paper
+    position under strategy_id='adaptive'.
+    """
+    runner, service, candidate, state = _follow_runner_and_state(tmp_path)
+
+    # Tick 1 — park the maker.
+    _apply_book(state, bid_yes=0.66, ask_yes=0.68)
+    ctx1 = _context_for_follow(state, candidate, _follow_packet(candidate.market_id))
+    asyncio.run(runner._paper_execute_for_strategy(ctx1, "adaptive"))
+    assert runner._pending_makers, "setup precondition: maker parked"
+
+    # Tick 2 — market pulls back so ask crosses our limit.
+    _apply_book(state, bid_yes=0.60, ask_yes=0.62)
+    ctx2 = _context_for_follow(
+        state, candidate, _follow_packet(candidate.market_id, bid_yes=0.60, ask_yes=0.62)
+    )
+    asyncio.run(runner._paper_execute_for_strategy(ctx2, "adaptive"))
+
+    # Maker is gone (consumed by the fill), and an adaptive position exists.
+    key = ("adaptive", candidate.market_id)
+    assert key not in runner._pending_makers
+    positions = service.portfolio.list_open_positions(strategy_id="adaptive")
+    assert len(positions) == 1
+    assert positions[0].market_id == candidate.market_id
+    # Entry price is the maker's limit, not the current ask.
+    assert abs(positions[0].entry_price - 0.6633) < 1e-4
+
+
+def test_follow_maker_cancelled_when_regime_flips(tmp_path: Path) -> None:
+    """A parked maker is dropped when the subsequent tick's assessment
+    is not follow-with-maker (regime returned to RANGING or abstained).
+    """
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.btc_state import BtcSnapshot
+    from polymarket_ai_agent.types import MarketAssessment, SuggestedSide
+
+    runner, service, candidate, state = _follow_runner_and_state(tmp_path)
+    _apply_book(state, bid_yes=0.66, ask_yes=0.68)
+
+    # Tick 1: follow-maker → park.
+    ctx1 = _context_for_follow(state, candidate, _follow_packet(candidate.market_id))
+    asyncio.run(runner._paper_execute_for_strategy(ctx1, "adaptive"))
+    key = ("adaptive", candidate.market_id)
+    assert key in runner._pending_makers
+
+    # Tick 2: regime flipped — new assessment is an ABSTAIN (non-follow).
+    abstain = MarketAssessment(
+        market_id=candidate.market_id,
+        fair_probability=0.50,
+        confidence=0.0,
+        suggested_side=SuggestedSide.ABSTAIN,
+        expiry_risk="LOW",
+        reasons_for_trade=[],
+        reasons_to_abstain=["regime flipped"],
+        edge=0.0,
+        raw_model_output="adaptive-regime-gated",
+    )
+    btc = BtcSnapshot(
+        price=70000.0,
+        observed_at=datetime.now(timezone.utc),
+        log_return_10s=0.0, log_return_1m=0.0, log_return_5m=0.0,
+        log_return_15m=0.0, realized_vol_30m=0.002, sample_count=50,
+    )
+    from polymarket_ai_agent.types import EvidencePacket
+    packet = EvidencePacket(
+        market_id=candidate.market_id,
+        question="test",
+        resolution_criteria="-",
+        market_probability=0.5,
+        orderbook_midpoint=0.50,
+        spread=0.02,
+        depth_usd=500.0,
+        seconds_to_expiry=540,
+        external_price=70000.0,
+        recent_price_change_bps=0.0,
+        recent_trade_count=0,
+        reasons_context=[],
+        citations=[],
+        bid_yes=0.49,
+        ask_yes=0.51,
+        btc_log_return_since_candle_open=0.0,
+        realized_vol_30m=0.002,
+        btc_log_return_1h=0.0002,
+        btc_log_return_4h=0.0002,  # RANGING
+        time_elapsed_in_candle_s=360,
+    )
+    ctx2 = DecisionContext(
+        market_id=candidate.market_id,
+        candidate=candidate,
+        features=state.features(),
+        btc_snapshot=btc,
+        assessment=abstain,
+        metrics=DaemonMetrics(),
+        packet=packet,
+    )
+
+    asyncio.run(runner._paper_execute_for_strategy(ctx2, "adaptive"))
+    assert key not in runner._pending_makers, "stale maker must be cancelled on regime flip"
+    assert service.portfolio.list_open_positions() == []

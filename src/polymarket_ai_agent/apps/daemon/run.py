@@ -17,8 +17,17 @@ from polymarket_ai_agent.config import (
 )
 from polymarket_ai_agent.connectors.binance_ws import BinanceBtcFeed, BtcTick
 from polymarket_ai_agent.connectors.polymarket_ws import MarketStreamEvent, PolymarketMarketStream
-from polymarket_ai_agent.engine.adaptive_scoring import AdaptiveScorer
+from polymarket_ai_agent.engine.adaptive_scoring import (
+    ADAPTIVE_FOLLOW_MAKER_TAG,
+    AdaptiveScorer,
+)
 from polymarket_ai_agent.engine.btc_state import BtcSnapshot, BtcState
+from polymarket_ai_agent.engine.execution.paper_maker import (
+    PaperMakerOrder,
+    check_fill,
+    is_expired,
+    maker_limit_price,
+)
 from polymarket_ai_agent.engine.market_state import MarketFeatures, MarketState
 from polymarket_ai_agent.engine.quant_scoring import QuantScoringEngine
 from polymarket_ai_agent.engine.regime import Regime, classify_regime
@@ -28,11 +37,14 @@ from polymarket_ai_agent.types import (
     DecisionStatus,
     EvidencePacket,
     ExecutionMode,
+    ExecutionResult,
+    ExecutionStyle,
     MarketAssessment,
     MarketCandidate,
     MarketSnapshot,
     OrderBookSnapshot,
     SuggestedSide,
+    TradeDecision,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,6 +250,14 @@ class DaemonRunner:
         # an entry cooldown that blocks whipsaw re-entries on the same
         # (strategy, market) pair. In-memory only.
         self._last_close_at: dict[tuple[str, str], datetime] = {}
+        # Pending paper-maker orders keyed on (strategy_id, market_id).
+        # Phase 3 adaptive-follow: when the adaptive scorer picks a
+        # follow-with-maker side, the daemon parks a resting limit here
+        # until the book crosses it or the TTL expires. In-memory only —
+        # unfilled makers don't survive a daemon restart, which matches
+        # the operator-friendly "restart = clean slate" expectation for
+        # paper mode.
+        self._pending_makers: dict[tuple[str, str], PaperMakerOrder] = {}
         # Cursor into settings_changes for the reload loop. Set to the table's
         # MAX(id) at startup so the loop only reacts to *subsequent* changes;
         # the baseline seed that landed during migration isn't replayed as a
@@ -710,6 +730,11 @@ class DaemonRunner:
             self.service.portfolio.get_open_position, market_id, strategy_id
         )
         if open_pos is not None:
+            # An open position supersedes any pending maker — it either
+            # just filled (our own maker converted) or was opened by a
+            # prior tick's taker entry. Either way, the pending-maker
+            # slot is stale.
+            self._pending_makers.pop(extras_key, None)
             # Use the BID we could actually sell into (YES bid for YES, NO bid
             # for NO) as the exit-trigger price, not the mid. Mid-based triggers
             # + bid-based fills produce a nasty gap on wide-spread books: SL
@@ -839,6 +864,30 @@ class DaemonRunner:
             return  # Do not open a duplicate while a position is live.
         # Clean up extras if no open position exists (e.g., previous TTE close).
         self._position_extras.pop(extras_key, None)
+
+        # Follow-with-maker branch: the adaptive scorer signals a follow
+        # via raw_model_output. Route to the paper-maker lifecycle and
+        # return — the normal risk → execute → taker path doesn't apply
+        # because the follow assessment's ``edge`` is zeroed by design.
+        if assessment.raw_model_output == ADAPTIVE_FOLLOW_MAKER_TAG:
+            await self._handle_follow_maker(context, strategy_id)
+            return
+
+        # Assessment is not a follow-maker — drop any stale pending maker
+        # left over from a previous tick when the regime was still trending.
+        if extras_key in self._pending_makers:
+            cancelled = self._pending_makers.pop(extras_key)
+            await asyncio.to_thread(
+                self.service.journal.log_event,
+                "paper_maker_cancelled",
+                {
+                    "market_id": market_id,
+                    "strategy_id": strategy_id,
+                    "side": cancelled.side.value,
+                    "limit_price": cancelled.limit_price,
+                    "reason": "regime_no_longer_follow",
+                },
+            )
 
         # Enforce entry cooldown after a recent close on this (strategy, market).
         cooldown_seconds = int(settings.paper_entry_cooldown_seconds)
@@ -1078,6 +1127,148 @@ class DaemonRunner:
             "strategy_id": strategy_id,
         }
         await asyncio.to_thread(self.service.journal.log_event, "position_closed", payload)
+
+    async def _handle_follow_maker(
+        self,
+        context: DecisionContext,
+        strategy_id: str,
+    ) -> None:
+        """Drive the paper-maker lifecycle for a follow-with-maker tick.
+
+        State machine per (strategy_id, market_id):
+        - No pending order → compute a discounted-mid limit and park it.
+        - Pending order + current ask crossed the limit → convert to a
+          paper fill by recording an execution against the strategy's
+          portfolio slice.
+        - Pending order + TTL elapsed → cancel and emit a log.
+        - Otherwise (pending, not filled, not expired) → wait.
+
+        Cooldown, candle-elapsed, and min_edge gates from the taker path
+        don't apply: the whole point of follow-maker is to rest quietly
+        and only fill on a favourable pullback, so time-based and edge-
+        based filters would just suppress the setup entirely.
+        """
+        settings = self.settings
+        market_id = context.market_id
+        features = context.features
+        assessment = context.assessment
+        key = (strategy_id, market_id)
+        now = _utc_now()
+        pending = self._pending_makers.get(key)
+
+        if pending is not None:
+            if check_fill(pending, features.ask_yes, features.ask_no):
+                await self._fill_paper_maker(pending, context)
+                self._pending_makers.pop(key, None)
+                return
+            if is_expired(pending, now):
+                self._pending_makers.pop(key, None)
+                await asyncio.to_thread(
+                    self.service.journal.log_event,
+                    "paper_maker_cancelled",
+                    {
+                        "market_id": market_id,
+                        "strategy_id": strategy_id,
+                        "side": pending.side.value,
+                        "limit_price": pending.limit_price,
+                        "reason": "ttl_expired",
+                        "ttl_seconds": pending.ttl_seconds,
+                    },
+                )
+                # Fall through to place a fresh maker if the regime still
+                # says follow — the adaptive scorer already vetted that.
+            else:
+                return
+
+        discount_bps = float(settings.paper_follow_limit_discount_bps)
+        ttl_seconds = int(settings.paper_follow_maker_ttl_seconds)
+        limit_price = maker_limit_price(
+            assessment.suggested_side,
+            features.bid_yes,
+            features.ask_yes,
+            features.bid_no,
+            features.ask_no,
+            discount_bps,
+        )
+        if limit_price <= 0.0:
+            return  # Book too thin or crossed — skip this tick.
+
+        size_usd = float(settings.max_position_usd)
+        order = PaperMakerOrder(
+            strategy_id=strategy_id,
+            market_id=market_id,
+            side=assessment.suggested_side,
+            limit_price=round(limit_price, 6),
+            size_usd=size_usd,
+            placed_at=now,
+            ttl_seconds=ttl_seconds,
+        )
+        self._pending_makers[key] = order
+        await asyncio.to_thread(
+            self.service.journal.log_event,
+            "paper_maker_placed",
+            {
+                "market_id": market_id,
+                "strategy_id": strategy_id,
+                "side": order.side.value,
+                "limit_price": order.limit_price,
+                "size_usd": order.size_usd,
+                "ttl_seconds": order.ttl_seconds,
+                "discount_bps": discount_bps,
+                "mid_yes": features.mid_yes,
+                "mid_no": features.mid_no,
+            },
+        )
+
+    async def _fill_paper_maker(
+        self,
+        order: PaperMakerOrder,
+        context: DecisionContext,
+    ) -> None:
+        """Convert a crossed paper-maker rest into a recorded position.
+
+        Builds a synthetic APPROVED TradeDecision + FILLED_PAPER
+        ExecutionResult so the existing ``record_execution`` path
+        registers the position under the right ``strategy_id`` with the
+        maker's exact limit price as the entry. The portfolio layer
+        treats the fill identically to a taker fill from that point on —
+        the TP ladder, trailing stop, and exit buffer all apply because
+        the open-position row is keyed on (market_id, strategy_id).
+        """
+        order_id = f"paper-maker-{order.strategy_id}-{order.market_id}-{int(order.placed_at.timestamp())}"
+        filled_shares = order.size_usd / max(order.limit_price, 1e-9)
+        now = _utc_now()
+        decision = TradeDecision(
+            market_id=order.market_id,
+            status=DecisionStatus.APPROVED,
+            side=order.side,
+            size_usd=order.size_usd,
+            limit_price=order.limit_price,
+            rationale=[f"adaptive-follow-maker fill at {order.limit_price:.4f}"],
+            rejected_by=[],
+            asset_id="",
+            execution_style=ExecutionStyle.GTC_MAKER,
+            post_only=True,
+            strategy_id=order.strategy_id,
+        )
+        result = ExecutionResult(
+            market_id=order.market_id,
+            success=True,
+            mode=ExecutionMode.PAPER,
+            order_id=order_id,
+            status="FILLED_PAPER",
+            detail=(
+                f"Paper maker fill {filled_shares:.6f} shares of {order.side.value} "
+                f"@ {order.limit_price:.4f} [GTC_MAKER]"
+            ),
+            fill_price=order.limit_price,
+            filled_size_shares=filled_shares,
+            remaining_size_shares=0.0,
+            execution_style=ExecutionStyle.GTC_MAKER,
+            executed_at=now,
+        )
+        await asyncio.to_thread(self.service.portfolio.record_execution, decision, result)
+        await asyncio.to_thread(self.service.journal.log_event, "execution_result", result)
 
     def _paper_exit_fill(
         self, market_id: str, side: "SuggestedSide", size_usd: float, fallback_price: float
