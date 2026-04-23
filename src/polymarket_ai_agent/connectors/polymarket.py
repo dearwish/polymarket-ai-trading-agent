@@ -415,6 +415,8 @@ class PolymarketConnector:
             return None
         yes_price, no_price = self._parse_outcome_prices(item.get("outcomePrices"))
         implied = yes_price if yes_price else 0.5
+        rewards_rate, rewards_max_spread, rewards_min_size = self._parse_rewards(item)
+        tick_size = self._parse_tick_size(item)
         return MarketCandidate(
             market_id=str(item.get("id", "")),
             question=question,
@@ -427,7 +429,82 @@ class PolymarketConnector:
             liquidity_usd=float(item.get("liquidityNum") or item.get("liquidityClob") or 0.0),
             volume_24h_usd=float(item.get("volume24hr") or item.get("volume24hrClob") or 0.0),
             resolution_source=item.get("description") or "",
+            rewards_daily_rate=rewards_rate,
+            rewards_max_spread_pct=rewards_max_spread,
+            rewards_min_size=rewards_min_size,
+            tick_size=tick_size,
         )
+
+    @staticmethod
+    def _parse_rewards(item: dict[str, Any]) -> tuple[float, float, float]:
+        """Extract (daily_rate, max_spread_pct, min_size) from a Polymarket
+        market item. Returns zeros when rewards aren't exposed — the BTC
+        short-horizon markets we trade today rarely carry maker subsidies,
+        so "no rewards" is a valid state.
+
+        Tolerant to multiple shapes seen across gamma and CLOB responses:
+        - ``rewards.rates[]`` array with ``asset_address`` matching USDC
+        - flat ``rewardsDailyRate`` / ``rewardsMinSize`` / ``rewardsMaxSpread``
+        """
+        rewards = item.get("rewards") if isinstance(item.get("rewards"), dict) else None
+        daily_rate = 0.0
+        max_spread = 0.0
+        min_size = 0.0
+        if rewards:
+            rates = rewards.get("rates") if isinstance(rewards.get("rates"), list) else []
+            for rate in rates:
+                if not isinstance(rate, dict):
+                    continue
+                # USDC is the only collateral on Polygon Polymarket; match by
+                # address (case-insensitive) so a stray bytes32 or reformatted
+                # string still resolves.
+                address = str(rate.get("asset_address") or rate.get("assetAddress") or "").lower()
+                if address and "2791bca1f2de4661ed88a30c99a7a9449aa84174" not in address:
+                    continue
+                try:
+                    daily_rate = float(rate.get("rewards_daily_rate") or rate.get("rewardsDailyRate") or 0.0)
+                    break
+                except (TypeError, ValueError):
+                    continue
+            try:
+                max_spread = float(rewards.get("max_spread") or rewards.get("maxSpread") or 0.0)
+            except (TypeError, ValueError):
+                max_spread = 0.0
+            try:
+                min_size = float(rewards.get("min_size") or rewards.get("minSize") or 0.0)
+            except (TypeError, ValueError):
+                min_size = 0.0
+        # Fallback to flat fields that some gamma responses expose directly.
+        if daily_rate == 0.0:
+            try:
+                daily_rate = float(item.get("rewardsDailyRate") or 0.0)
+            except (TypeError, ValueError):
+                daily_rate = 0.0
+        if max_spread == 0.0:
+            try:
+                max_spread = float(item.get("rewardsMaxSpread") or 0.0)
+            except (TypeError, ValueError):
+                max_spread = 0.0
+        if min_size == 0.0:
+            try:
+                min_size = float(item.get("rewardsMinSize") or 0.0)
+            except (TypeError, ValueError):
+                min_size = 0.0
+        return daily_rate, max_spread, min_size
+
+    @staticmethod
+    def _parse_tick_size(item: dict[str, Any]) -> float:
+        for key in ("minimum_tick_size", "minimumTickSize", "tickSize"):
+            raw = item.get(key)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0.0:
+                return value
+        return 0.01  # Polymarket CLOB default tick.
 
     def _sort_market_candidates(self, markets: list[MarketCandidate]) -> list[MarketCandidate]:
         def sort_key(candidate: MarketCandidate) -> tuple[int, float, float]:

@@ -49,6 +49,14 @@ class MarketCandidate:
     liquidity_usd: float
     volume_24h_usd: float
     resolution_source: str = ""
+    # Maker-reward parameters from Polymarket's CLOB ``rewards`` object.
+    # When the market has no maker incentives these stay at 0 and the
+    # reward-yield estimator returns 0 — markets without rewards are a
+    # valid state, not an error. See ``engine/maker_rewards.py``.
+    rewards_daily_rate: float = 0.0
+    rewards_max_spread_pct: float = 0.0
+    rewards_min_size: float = 0.0
+    tick_size: float = 0.01
 
 
 @dataclass(slots=True)

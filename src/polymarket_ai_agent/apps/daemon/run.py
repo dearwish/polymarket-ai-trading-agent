@@ -22,12 +22,14 @@ from polymarket_ai_agent.engine.adaptive_scoring import (
     AdaptiveScorer,
 )
 from polymarket_ai_agent.engine.btc_state import BtcSnapshot, BtcState
+from polymarket_ai_agent.engine.execution.book_utils import first_level_with_size
 from polymarket_ai_agent.engine.execution.paper_maker import (
     PaperMakerOrder,
     check_fill,
     is_expired,
     maker_limit_price,
 )
+from polymarket_ai_agent.engine.maker_rewards import estimate_reward_per_100
 from polymarket_ai_agent.engine.market_state import MarketFeatures, MarketState
 from polymarket_ai_agent.engine.quant_scoring import QuantScoringEngine
 from polymarket_ai_agent.engine.regime import Regime, classify_regime
@@ -628,6 +630,13 @@ class DaemonRunner:
             # completeness (e.g. tooltip on YES/NO picks).
             "reasons_to_abstain": list(assessment.reasons_to_abstain or []),
             "reasons_for_trade": list(assessment.reasons_for_trade or []),
+            # Expected daily maker-reward yield for $100 resting on the
+            # YES bid at mid — instrumentation for the gamma-trade-lab
+            # selection experiment. 0.0 on markets without rewards (most
+            # BTC short-horizon today). Logged here so analyze_soak can
+            # correlate yield estimates with realised performance before
+            # we wire ranking/filtering into discovery.
+            "estimated_reward_per_100_yes_bid": self._estimate_reward_at_yes_bid(context),
         }
         shadow = context.shadow_assessment
         if shadow is not None and strategy_id == _DEFAULT_STRATEGY_ID:
@@ -1141,7 +1150,16 @@ class DaemonRunner:
           paper fill by recording an execution against the strategy's
           portfolio slice.
         - Pending order + TTL elapsed → cancel and emit a log.
-        - Otherwise (pending, not filled, not expired) → wait.
+        - Pending order + material drift (price or size threshold
+          breached) → cancel and re-quote so we don't lose maker-reward
+          eligibility when the mid moves. Thresholds default to 0 = never
+          re-quote (behaviour preserved until operator opts in).
+        - Otherwise → wait.
+
+        Depth filter: when ``paper_follow_min_level_size_shares > 0`` we
+        replace the raw best-bid/ask with the first level carrying at
+        least that many shares before computing the mid anchor. Prevents
+        anchoring on a ghost 1-lot level at the top of the book.
 
         Cooldown, candle-elapsed, and min_edge gates from the taker path
         don't apply: the whole point of follow-maker is to rest quietly
@@ -1177,23 +1195,51 @@ class DaemonRunner:
                 )
                 # Fall through to place a fresh maker if the regime still
                 # says follow — the adaptive scorer already vetted that.
-            else:
-                return
+                pending = None
 
         discount_bps = float(settings.paper_follow_limit_discount_bps)
         ttl_seconds = int(settings.paper_follow_maker_ttl_seconds)
+        min_level_size = float(settings.paper_follow_min_level_size_shares)
+        bid_yes, ask_yes, bid_no, ask_no = self._depth_filtered_quotes(features, min_level_size)
         limit_price = maker_limit_price(
             assessment.suggested_side,
-            features.bid_yes,
-            features.ask_yes,
-            features.bid_no,
-            features.ask_no,
+            bid_yes,
+            ask_yes,
+            bid_no,
+            ask_no,
             discount_bps,
         )
         if limit_price <= 0.0:
             return  # Book too thin or crossed — skip this tick.
 
         size_usd = float(settings.max_position_usd)
+
+        if pending is not None and not self._maker_drift_exceeds_threshold(
+            pending,
+            desired_price=limit_price,
+            desired_size_usd=size_usd,
+            price_threshold=float(settings.paper_follow_cancel_price_threshold),
+            size_threshold_pct=float(settings.paper_follow_cancel_size_threshold_pct),
+        ):
+            return  # Keep the existing quote; drift is within tolerance.
+
+        if pending is not None:
+            self._pending_makers.pop(key, None)
+            await asyncio.to_thread(
+                self.service.journal.log_event,
+                "paper_maker_cancelled",
+                {
+                    "market_id": market_id,
+                    "strategy_id": strategy_id,
+                    "side": pending.side.value,
+                    "limit_price": pending.limit_price,
+                    "reason": "drift_threshold",
+                    "desired_price": round(limit_price, 6),
+                    "price_delta": round(abs(limit_price - pending.limit_price), 6),
+                    "size_delta_pct": self._size_delta_pct(pending.size_usd, size_usd),
+                },
+            )
+
         order = PaperMakerOrder(
             strategy_id=strategy_id,
             market_id=market_id,
@@ -1217,7 +1263,84 @@ class DaemonRunner:
                 "discount_bps": discount_bps,
                 "mid_yes": features.mid_yes,
                 "mid_no": features.mid_no,
+                "min_level_size_shares": min_level_size,
             },
+        )
+
+    @staticmethod
+    def _depth_filtered_quotes(
+        features: MarketFeatures,
+        min_level_size: float,
+    ) -> tuple[float, float, float, float]:
+        """Return ``(bid_yes, ask_yes, bid_no, ask_no)`` with ghost levels
+        filtered out. Falls back to the raw best when either the side is
+        empty or no level meets ``min_level_size`` — preserves the
+        "skip this tick" contract that :func:`maker_limit_price` relies
+        on when the book is degenerate.
+        """
+        if min_level_size <= 0.0:
+            return features.bid_yes, features.ask_yes, features.bid_no, features.ask_no
+        bid_yes = first_level_with_size(features.bid_levels_yes, min_level_size) or features.bid_yes
+        ask_yes = first_level_with_size(features.ask_levels_yes, min_level_size) or features.ask_yes
+        bid_no = first_level_with_size(features.bid_levels_no, min_level_size) or features.bid_no
+        ask_no = first_level_with_size(features.ask_levels_no, min_level_size) or features.ask_no
+        return bid_yes, ask_yes, bid_no, ask_no
+
+    @staticmethod
+    def _maker_drift_exceeds_threshold(
+        pending: PaperMakerOrder,
+        desired_price: float,
+        desired_size_usd: float,
+        price_threshold: float,
+        size_threshold_pct: float,
+    ) -> bool:
+        """True when the desired quote has drifted far enough from the
+        resting order to justify cancel-and-replace. Both thresholds are
+        inclusive "ignore smaller changes" bands; setting either to 0
+        treats any nonzero drift as material (matches the reference
+        repo's ``should_cancel`` semantics when its 0.5¢ / 10% gates are
+        set tight).
+
+        We cancel on EITHER axis breaching so price-tracking and
+        size-resizing can be tuned independently.
+        """
+        price_delta = abs(desired_price - pending.limit_price)
+        if price_threshold > 0.0 and price_delta >= price_threshold:
+            return True
+        if size_threshold_pct > 0.0 and pending.size_usd > 0.0:
+            pct = abs(desired_size_usd - pending.size_usd) / pending.size_usd * 100.0
+            if pct >= size_threshold_pct:
+                return True
+        return False
+
+    @staticmethod
+    def _size_delta_pct(prev_size_usd: float, desired_size_usd: float) -> float:
+        if prev_size_usd <= 0.0:
+            return 0.0
+        return round(abs(desired_size_usd - prev_size_usd) / prev_size_usd * 100.0, 4)
+
+    @staticmethod
+    def _estimate_reward_at_yes_bid(context: "DecisionContext") -> float:
+        """Daily maker-reward yield per $100 if we were resting on the
+        current YES bid. Returns 0.0 for markets without maker subsidies
+        or when the book is missing. Instrumentation only — the selection
+        loop doesn't consume this yet.
+        """
+        candidate = context.candidate
+        if candidate.rewards_daily_rate <= 0.0:
+            return 0.0
+        features = context.features
+        if features.bid_yes <= 0.0 or features.mid_yes <= 0.0:
+            return 0.0
+        return round(
+            estimate_reward_per_100(
+                target_price=features.bid_yes,
+                midpoint=features.mid_yes,
+                book_levels=features.bid_levels_yes,
+                max_spread_pct=candidate.rewards_max_spread_pct,
+                daily_reward_usd=candidate.rewards_daily_rate,
+            ),
+            4,
         )
 
     async def _fill_paper_maker(

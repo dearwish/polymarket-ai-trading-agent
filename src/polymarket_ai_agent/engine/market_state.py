@@ -130,6 +130,17 @@ class MarketFeatures:
     trade_count_5s: int
     last_update_age_seconds: float
     two_sided: bool
+    # Top-N sorted levels per side for each token. Bids arrive
+    # high-to-low, asks low-to-high — the same order
+    # :class:`OrderBookSide.sorted_levels` returns. Consumed by the
+    # follow-with-maker path via ``first_level_with_size`` to skip ghost
+    # levels when computing a real mid. Defaults to empty so older
+    # fixtures / tests that build ``MarketFeatures`` positionally stay
+    # compatible.
+    bid_levels_yes: list[tuple[float, float]] = field(default_factory=list)
+    ask_levels_yes: list[tuple[float, float]] = field(default_factory=list)
+    bid_levels_no: list[tuple[float, float]] = field(default_factory=list)
+    ask_levels_no: list[tuple[float, float]] = field(default_factory=list)
 
 
 class MarketState:
@@ -251,6 +262,10 @@ class MarketState:
         current = now or _utc_now()
         flow, trade_count = self.signed_flow(now=current)
         age = max(0.0, (current - self.last_update).total_seconds())
+        # Top-5 per side is enough for depth-filtered best-price lookups
+        # (ghost levels rarely stack more than 2-3 deep). Carrying more
+        # would cost memory + log volume without improving the filter.
+        top_n = 5
         return MarketFeatures(
             market_id=self.market_id,
             yes_token_id=self.yes_token_id,
@@ -270,4 +285,8 @@ class MarketState:
             trade_count_5s=trade_count,
             last_update_age_seconds=age,
             two_sided=self.yes_book.two_sided(),
+            bid_levels_yes=self.yes_book.bids.sorted_levels()[:top_n],
+            ask_levels_yes=self.yes_book.asks.sorted_levels()[:top_n],
+            bid_levels_no=self.no_book.bids.sorted_levels()[:top_n],
+            ask_levels_no=self.no_book.asks.sorted_levels()[:top_n],
         )

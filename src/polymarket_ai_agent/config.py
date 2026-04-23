@@ -126,6 +126,19 @@ class Settings(BaseSettings):
     # BTC Up/Down markets — revisit after the first trending-regime soak.
     paper_follow_limit_discount_bps: float = 50.0
     paper_follow_maker_ttl_seconds: int = 300
+    # Maker-yield selection (Tier 2 from gamma-trade-lab reference, 2026-04):
+    # gate cancel/replace on material drift so the follow-maker path can
+    # track a moving mid without churning on every tick. Both thresholds
+    # default to 0.0 = never re-price a resting order (preserves the
+    # existing "rest and wait for TTL" behaviour); raise the price
+    # threshold to e.g. 0.005 (half-cent) and the size threshold to 10%
+    # to opt in to price tracking.
+    paper_follow_cancel_price_threshold: float = 0.0
+    paper_follow_cancel_size_threshold_pct: float = 0.0
+    # Depth filter for anchoring the maker mid. With min>0 we skip ghost
+    # 1-lot levels when computing best-bid/best-ask — prevents the paper
+    # maker from posting behind a phantom order. 0.0 disables (raw mid).
+    paper_follow_min_level_size_shares: float = 0.0
 
     fee_bps: float = 0.0
     execution_maker_min_edge: float = 0.04
@@ -302,6 +315,30 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "type": "number",
         "min": 0,
         "max": 3600,
+        "step": 1,
+        "group": "paper",
+    },
+    "paper_follow_cancel_price_threshold": {
+        "label": "Follow Maker Cancel Price Threshold",
+        "type": "number",
+        "min": 0,
+        "max": 1,
+        "step": 0.001,
+        "group": "paper",
+    },
+    "paper_follow_cancel_size_threshold_pct": {
+        "label": "Follow Maker Cancel Size Threshold (%)",
+        "type": "number",
+        "min": 0,
+        "max": 100,
+        "step": 0.1,
+        "group": "paper",
+    },
+    "paper_follow_min_level_size_shares": {
+        "label": "Follow Maker Min Level Size (shares)",
+        "type": "number",
+        "min": 0,
+        "max": 100000,
         "step": 1,
         "group": "paper",
     },

@@ -58,6 +58,9 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     "paper_exit_slippage_bps": 10.0,
     "paper_follow_limit_discount_bps": 50.0,
     "paper_follow_maker_ttl_seconds": 300,
+    "paper_follow_cancel_price_threshold": 0.0,
+    "paper_follow_cancel_size_threshold_pct": 0.0,
+    "paper_follow_min_level_size_shares": 0.0,
     "fee_bps": 0.0,
     # --- Quant scorer gates ---
     "quant_invert_drift": False,
