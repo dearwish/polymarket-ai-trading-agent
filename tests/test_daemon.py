@@ -548,10 +548,11 @@ def test_paper_trailing_stop_rides_up_then_exits_on_reversal(tmp_path) -> None:
         features=state_up.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
     )
     asyncio.run(runner._paper_execute_decision_callback(ctx_up))
-    # Still open — peak now tracks the BID (0.79) since exit triggers use the
-    # sellable price. Trail level = 0.79 × 0.90 = 0.711, current bid = 0.79.
+    # Still open — peak tracks the exit-walk VWAP (with slippage), which is
+    # slightly below the raw bid of 0.79 after the 10bps exit slippage bps.
+    # Trail level ≈ peak × 0.90, current VWAP still well above it.
     assert len(service.portfolio.list_open_positions()) == 1
-    assert runner._position_extras[("fade", candidate.market_id)]["peak_price"] >= 0.79
+    assert runner._position_extras[("fade", candidate.market_id)]["peak_price"] >= 0.78
 
     # Reverse: bid drops to 0.60, well below the 0.711 trail level → exit.
     state_down = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
@@ -812,7 +813,11 @@ def test_paper_exit_fill_walks_bid_book_for_yes_position(tmp_path) -> None:
     runner._market_states[candidate.market_id] = state
     # Position is ~19.96 YES shares at 0.51051 entry = $10 size.
     # Selling 20-ish at the staggered bid gives VWAP around 0.595 not 0.61 (mid).
-    exit_price = runner._paper_exit_fill(candidate.market_id, SuggestedSide.YES, 10.0, 0.61)
+    # entry_price is passed so target_shares walks the actual holdings (not the
+    # fictional mid-derived count that amplifies VWAP on losing positions).
+    exit_price = runner._paper_exit_fill(
+        candidate.market_id, SuggestedSide.YES, 10.0, 0.51051, 0.61
+    )
     assert 0.58 < exit_price < 0.60, f"expected book-walked VWAP in (0.58, 0.60), got {exit_price}"
 
 
@@ -1835,6 +1840,135 @@ def test_daemon_tick_surfaces_reward_estimate_for_rewarded_market(
     payload = ticks[-1]["payload"]
     assert "estimated_reward_per_100_yes_bid" in payload
     assert payload["estimated_reward_per_100_yes_bid"] > 0.0
+
+
+def test_paper_exit_fill_target_shares_use_entry_price_not_current_mid(
+    tmp_path: Path,
+) -> None:
+    """Regression for the share-count bug: on a losing position, computing
+    target_shares = size_usd / current_bid over-targets the walk (mid fell
+    → more "shares" than we actually hold). VWAP skewed lower, realised
+    loss exceeds the SL threshold unrealistically. Fix: use entry_price
+    so the walk matches actual holdings.
+    """
+    from polymarket_ai_agent.engine.market_state import MarketState
+    from polymarket_ai_agent.types import SuggestedSide
+
+    runner, _, candidate, _, _ = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50, settings_overrides={"paper_exit_slippage_bps": 0.0},
+    )
+    # Position holds $10 at entry ~0.51 → ~19.6 shares. Bid book crashes
+    # to a thin top plus a fat deep level. Walking 19.6 shares gives a
+    # certain VWAP; walking the buggy mid-derived count (10/0.20 = 50
+    # shares) would plunge much deeper.
+    state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [
+            {"price": "0.40", "size": "20"},  # fits our actual holdings
+            {"price": "0.10", "size": "500"},  # where the buggy walk would land
+        ],
+        "asks": [{"price": "0.60", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state
+
+    # With entry_price=0.51 (actual hold ≈ 19.6 shares): all 19.6 fit in the
+    # top level at 0.40 → VWAP ≈ 0.40.
+    correct = runner._paper_exit_fill(
+        candidate.market_id, SuggestedSide.YES, 10.0, 0.51, 0.20
+    )
+    # With the buggy mid-derived count (10/0.20=50 shares): walks 20 at 0.40 +
+    # 30 at 0.10 = VWAP ≈ 0.22. The actual fix means we never touch the 0.10
+    # level — fill sits at the top real bid.
+    assert 0.38 < correct <= 0.40, (
+        f"expected exit ~0.40 (walked actual share count), got {correct}"
+    )
+
+
+def test_sl_does_not_fire_when_exit_vwap_is_above_threshold(tmp_path: Path) -> None:
+    """Regression for the 50%-realised-on-20%-SL bug — half of the fix.
+
+    The old logic fired SL on raw top-of-bid, then realised the actual fill
+    by walking the whole book VWAP. A 1-share ghost at 0.40 (below the
+    −20% line) tripped the trigger, but the walk then consumed a deep 500-
+    share level at 0.30, realising −40%. The fix uses the full exit-walk
+    VWAP as the trigger, so if most of our holdings would actually fill at
+    0.46 (above threshold), the SL stays dormant.
+    """
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    runner, service, candidate, approved, btc = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50, settings_overrides={
+            "paper_stop_loss_pct": 0.20,
+            "paper_exit_slippage_bps": 0.0,
+        },
+    )
+
+    # Ghost 1-share at 0.40; 500-share real level at 0.46 underneath. Our
+    # ~19.6 shares almost entirely fill at 0.46 → walk VWAP ≈ 0.459. pnl
+    # ≈ −10%, well above the −20% trigger. SL must NOT fire.
+    state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [
+            {"price": "0.46", "size": "500"},
+            {"price": "0.40", "size": "1"},  # ghost deeper — ignored at this size
+        ],
+        "asks": [{"price": "0.48", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state
+    ctx = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx))
+    assert len(service.portfolio.list_open_positions()) == 1, (
+        "SL must NOT fire when the exit-walk VWAP is above the threshold"
+    )
+
+
+def test_sl_fires_when_exit_vwap_crosses_threshold(tmp_path: Path) -> None:
+    """Converse of the above: when our actual exit VWAP crosses the SL
+    threshold, the position closes. And critically, the CLOSED position's
+    exit_price matches the trigger price — no surprise gap.
+    """
+    from polymarket_ai_agent.apps.daemon.run import DecisionContext
+    from polymarket_ai_agent.engine.market_state import MarketState
+
+    runner, service, candidate, approved, btc = _setup_runner_with_open_yes_position(
+        tmp_path, entry_price=0.50, settings_overrides={
+            "paper_stop_loss_pct": 0.20,
+            "paper_exit_slippage_bps": 0.0,
+        },
+    )
+
+    # 2-share ghost at 0.45 + 500-share real at 0.38. Our ~19.6 shares:
+    # 2 at 0.45 + 17.6 at 0.38 = 0.9 + 6.688 = 7.588 → VWAP = 0.387.
+    # pnl from entry 0.51 = (0.387 - 0.51)/0.51 = −24.1%. Below −20%. Fires.
+    state = MarketState(market_id=candidate.market_id, yes_token_id="yes-tok", no_token_id="no-tok")
+    state.apply_book_snapshot({
+        "asset_id": "yes-tok",
+        "bids": [
+            {"price": "0.45", "size": "2"},
+            {"price": "0.38", "size": "500"},
+        ],
+        "asks": [{"price": "0.48", "size": "500"}],
+    })
+    runner._market_states[candidate.market_id] = state
+    ctx = DecisionContext(
+        market_id=candidate.market_id, candidate=candidate,
+        features=state.features(), btc_snapshot=btc, assessment=approved, metrics=runner.metrics,
+    )
+    asyncio.run(runner._paper_execute_decision_callback(ctx))
+    closed = service.portfolio.list_closed_positions(limit=10)
+    assert len(closed) == 1, "SL must fire when exit VWAP crosses the threshold"
+    assert closed[0].close_reason == "paper_stop_loss"
+    # No surprise gap: the exit_price is the same VWAP that triggered the SL.
+    # (Both pass through apply_exit_slippage which is zero'd for this test.)
+    assert 0.38 < closed[0].exit_price < 0.40, (
+        f"exit price {closed[0].exit_price} must equal trigger VWAP (~0.387)"
+    )
 
 
 def test_daemon_tick_reward_estimate_is_zero_for_unrewarded_market(

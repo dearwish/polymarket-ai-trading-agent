@@ -744,18 +744,22 @@ class DaemonRunner:
             # prior tick's taker entry. Either way, the pending-maker
             # slot is stale.
             self._pending_makers.pop(extras_key, None)
-            # Use the BID we could actually sell into (YES bid for YES, NO bid
-            # for NO) as the exit-trigger price, not the mid. Mid-based triggers
-            # + bid-based fills produce a nasty gap on wide-spread books: SL
-            # thresholded on mid (say −20%) fires when the bid is already at
-            # −45% and we realise the full −45% at close. Using bid on both
-            # sides keeps the threshold and the realisation in the same frame.
-            # Fall back to mid only if bid isn't populated yet (cold-start book).
-            if open_pos.side == SuggestedSide.YES:
-                current_price = features.bid_yes if features.bid_yes > 0.0 else features.mid_yes
-            else:
-                current_price = features.bid_no if features.bid_no > 0.0 else features.mid_no
+            # Use the ACTUAL exit-walk VWAP as the trigger price, so the SL /
+            # TP / trail threshold evaluates against the same price we'd
+            # realise on close. Earlier versions used raw top-of-bid, which
+            # produced a painful gap on thin books: SL fired at −20% on a
+            # 1-share ghost bid, then the walk realised −30 to −50% when it
+            # consumed deeper levels. Walking the book once per tick and
+            # reusing that VWAP for both trigger and exit aligns them
+            # perfectly — trigger is exactly what the sim would fill at.
+            # Fallback to mid only when the book is totally empty.
             entry_price = float(open_pos.entry_price)
+            fallback_mid = (
+                features.mid_yes if open_pos.side == SuggestedSide.YES else features.mid_no
+            )
+            current_price = self._paper_exit_fill(
+                market_id, open_pos.side, float(open_pos.size_usd), entry_price, fallback_mid
+            )
             if current_price > 0.0 and entry_price > 0.0:
                 pnl_pct = (current_price - entry_price) / entry_price
                 # Bootstrap per-position state on first sight. If the daemon
@@ -783,7 +787,7 @@ class DaemonRunner:
                         effective_fraction = min(1.0, target_close_usd / max(current_size, 1e-9))
                         tranche_size_usd = effective_fraction * current_size
                         exit_price_walk = self._paper_exit_fill(
-                            market_id, open_pos.side, tranche_size_usd, float(current_price)
+                            market_id, open_pos.side, tranche_size_usd, entry_price, float(current_price)
                         )
                         await asyncio.to_thread(
                             lambda: self.service.portfolio.partial_close_position(
@@ -814,7 +818,7 @@ class DaemonRunner:
                 trail_floor = max(peak * (1.0 - trail_pct), entry_price)
                 if trail_pct > 0.0 and trail_armed and current_price <= trail_floor:
                     exit_price_walk = self._paper_exit_fill(
-                        market_id, open_pos.side, float(open_pos.size_usd), float(current_price)
+                        market_id, open_pos.side, float(open_pos.size_usd), entry_price, float(current_price)
                     )
                     await self._finalize_paper_close(
                         open_pos, exit_price_walk, "paper_trailing_stop", tte_seconds, context,
@@ -838,7 +842,7 @@ class DaemonRunner:
                     close_reason = "paper_stop_loss"
                 if close_reason is not None:
                     exit_price_walk = self._paper_exit_fill(
-                        market_id, open_pos.side, float(open_pos.size_usd), float(current_price)
+                        market_id, open_pos.side, float(open_pos.size_usd), entry_price, float(current_price)
                     )
                     await self._finalize_paper_close(
                         open_pos, exit_price_walk, close_reason, tte_seconds, context,
@@ -853,7 +857,8 @@ class DaemonRunner:
             force_tte = int(settings.position_force_exit_tte_seconds)
             if force_tte > 0 and tte_seconds <= force_tte and current_price > 0.0:
                 exit_price_walk = self._paper_exit_fill(
-                    market_id, open_pos.side, float(open_pos.size_usd), float(current_price)
+                    market_id, open_pos.side, float(open_pos.size_usd),
+                    float(open_pos.entry_price), float(current_price),
                 )
                 await self._finalize_paper_close(
                     open_pos, exit_price_walk, "paper_time_based_exit", tte_seconds, context,
@@ -864,7 +869,8 @@ class DaemonRunner:
             exit_buffer = self.service.risk.exit_buffer_seconds_for_tte(tte_seconds)
             if tte_seconds <= exit_buffer and current_price > 0.0:
                 exit_price_walk = self._paper_exit_fill(
-                    market_id, open_pos.side, float(open_pos.size_usd), float(current_price)
+                    market_id, open_pos.side, float(open_pos.size_usd),
+                    float(open_pos.entry_price), float(current_price),
                 )
                 await self._finalize_paper_close(
                     open_pos, exit_price_walk, "paper_tte_exit", tte_seconds, context,
@@ -1025,7 +1031,9 @@ class DaemonRunner:
             if side == SuggestedSide.NO
             else old_candidate.implied_probability
         )
-        exit_price = self._paper_exit_fill(market_id, side, float(open_pos.size_usd), fallback_price)
+        exit_price = self._paper_exit_fill(
+            market_id, side, float(open_pos.size_usd), float(open_pos.entry_price), fallback_price
+        )
         # Each open position carries its own strategy_id on the DB row, so
         # routing the close and the in-memory state cleanup to the right
         # slice is trivial — we just read it off the record.
@@ -1394,17 +1402,25 @@ class DaemonRunner:
         await asyncio.to_thread(self.service.journal.log_event, "execution_result", result)
 
     def _paper_exit_fill(
-        self, market_id: str, side: "SuggestedSide", size_usd: float, fallback_price: float
+        self,
+        market_id: str,
+        side: "SuggestedSide",
+        size_usd: float,
+        entry_price: float,
+        fallback_price: float,
     ) -> float:
         """Compute a realistic paper-mode exit fill by walking the live BID book.
 
         Closing a position means SELLING the token back. For YES positions we
         sell YES tokens → walk yes_book.bids best-first. For NO positions we
         sell NO tokens → walk no_book.bids best-first. The fill is the VWAP
-        across the levels consumed by `size_usd` worth of notional, minus an
-        additional ``paper_exit_slippage_bps`` nudge. Falls back to the passed-in
-        ``fallback_price`` (usually mid) with slippage when the book has no
-        levels for the closing side.
+        across the levels consumed by the actual shares we HOLD
+        (``size_usd / entry_price``) — NOT by shares that would be purchased
+        at the current mid. Using current mid over-targets the walk on losing
+        positions (mid fell → more shares "needed" than actually held) and
+        under-targets it on winners, both of which skew the VWAP unrealistically.
+        Falls back to the passed-in ``fallback_price`` (usually the current bid
+        or mid) with slippage when the book has no levels for the closing side.
         """
         state = self._market_states.get(market_id)
         if state is None:
@@ -1413,7 +1429,10 @@ class DaemonRunner:
         levels = list(book.bids.sorted_levels())
         if not levels:
             return self.service.portfolio.apply_exit_slippage(fallback_price)
-        target_shares = size_usd / max(fallback_price, 1e-9)
+        # Shares actually held = original notional / entry price. This is the
+        # exact count we'd try to offload; walking any other size produces a
+        # fictional VWAP and miscalibrates stop-loss realisation.
+        target_shares = size_usd / max(entry_price, 1e-9)
         remaining = target_shares
         notional = 0.0
         filled = 0.0
