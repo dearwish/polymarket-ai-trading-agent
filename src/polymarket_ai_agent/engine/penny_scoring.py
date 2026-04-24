@@ -48,9 +48,18 @@ class PennyScorer:
         self,
         entry_thresh: float = 0.03,
         min_entry_tte_seconds: int = 300,
+        max_adverse_move_bps: float = 50.0,
     ):
         self.entry_thresh = entry_thresh
         self.min_entry_tte_seconds = min_entry_tte_seconds
+        # Stabilisation gate: the YES mid must not have moved strongly
+        # AGAINST our intended side over the last 30s. Catching a falling
+        # knife in a trending move is the dominant loss pattern — losing
+        # trades exit the SL in 11-25 s (vs 34-164 s for winners), which
+        # means the price keeps collapsing straight through our entry.
+        # This gate filters for ticks where the move has paused, which is
+        # when a bounce actually becomes plausible.
+        self.max_adverse_move_bps = max_adverse_move_bps
 
     def score_market(self, packet: EvidencePacket) -> MarketAssessment:
         """Return an APPROVED YES/NO assessment when a penny setup is live,
@@ -103,6 +112,37 @@ class PennyScorer:
                     *base.reasons_to_abstain,
                 ],
             )
+
+        # Stabilisation gate: skip when the 30s YES-mid move is strongly
+        # pointed AGAINST our intended side. Encodes the "don't catch a
+        # falling knife" rule in one comparison.
+        #   - Buying NO → we need YES to stop rising (or start falling)
+        #   - Buying YES → we need YES to stop falling (or start rising)
+        # A zero threshold disables the gate and preserves legacy behaviour.
+        recent_move_bps = float(packet.recent_price_change_bps or 0.0)
+        if self.max_adverse_move_bps > 0.0:
+            if side is SuggestedSide.NO and recent_move_bps > self.max_adverse_move_bps:
+                return replace(
+                    base,
+                    reasons_to_abstain=[
+                        (
+                            f"Penny: YES mid +{recent_move_bps:.0f}bps over 30s "
+                            f"> {self.max_adverse_move_bps:.0f}bps; NO still collapsing."
+                        ),
+                        *base.reasons_to_abstain,
+                    ],
+                )
+            if side is SuggestedSide.YES and recent_move_bps < -self.max_adverse_move_bps:
+                return replace(
+                    base,
+                    reasons_to_abstain=[
+                        (
+                            f"Penny: YES mid {recent_move_bps:.0f}bps over 30s "
+                            f"< -{self.max_adverse_move_bps:.0f}bps; YES still collapsing."
+                        ),
+                        *base.reasons_to_abstain,
+                    ],
+                )
 
         # Flag the assessment with a high edge so the risk engine's
         # ``min_edge`` gate doesn't block — the penny branch uses its

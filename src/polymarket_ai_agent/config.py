@@ -156,6 +156,12 @@ class Settings(BaseSettings):
     # to 0 disables the gate. See scripts/backtest_penny.py for the
     # break-even hit-rate math.
     penny_stop_loss_multiple: float = 0.5
+    # Stabilisation gate: skip entries when the YES mid has moved
+    # strongly against our intended side over the last 30s. Encodes
+    # "don't catch a falling knife" from the 2026-04-24 live analysis:
+    # losers hit SL in 11-25 s because they entered mid-crash, while
+    # winners entered after the move paused. 0 disables the gate.
+    penny_max_adverse_move_bps: float = 50.0
     # Overreaction-fade strategy (adaptive_v2). Runs as a third scorer
     # alongside fade + penny; orthogonal signal: detects Polymarket mid
     # moves that outpace BTC's justification and bets the reversion. See
@@ -419,6 +425,14 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 1,
         "step": 0.05,
+        "group": "paper",
+    },
+    "penny_max_adverse_move_bps": {
+        "label": "Penny Max Adverse Move (bps over 30s)",
+        "type": "number",
+        "min": 0,
+        "max": 2000,
+        "step": 5,
         "group": "paper",
     },
     "adaptive_v2_enabled": {

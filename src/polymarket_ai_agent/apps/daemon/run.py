@@ -238,6 +238,7 @@ class DaemonRunner:
         self.penny = PennyScorer(
             entry_thresh=float(settings.penny_entry_thresh),
             min_entry_tte_seconds=int(settings.penny_min_entry_tte_seconds),
+            max_adverse_move_bps=float(settings.penny_max_adverse_move_bps),
         )
         self.adaptive_v2 = OverreactionScorer(
             overreaction_threshold=float(settings.adaptive_v2_overreaction_threshold),
@@ -1779,10 +1780,12 @@ class DaemonRunner:
         except Exception as exc:  # noqa: BLE001
             logger.warning("execution.refresh failed: %s", exc)
         # Rebuild the penny scorer so parameter changes (entry_thresh,
-        # min_entry_tte_seconds) take effect without a restart.
+        # min_entry_tte_seconds, stabilisation gate) take effect without
+        # a restart.
         self.penny = PennyScorer(
             entry_thresh=float(new_settings.penny_entry_thresh),
             min_entry_tte_seconds=int(new_settings.penny_min_entry_tte_seconds),
+            max_adverse_move_bps=float(new_settings.penny_max_adverse_move_bps),
         )
         # Same pattern for adaptive_v2 (overreaction-fade).
         self.adaptive_v2 = OverreactionScorer(
