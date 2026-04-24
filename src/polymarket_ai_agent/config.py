@@ -149,6 +149,13 @@ class Settings(BaseSettings):
     penny_force_exit_tte_seconds: int = 120
     penny_tp_multiple: float = 2.0
     penny_size_usd: float = 1.0
+    # Stop-loss as a multiple of entry price. 0.5 means "exit when bid
+    # drops to 50% of entry" (a 3¢ entry stops out at 1.5¢). Caps each
+    # losing trade at −(1 − multiple) × size instead of riding to the
+    # TTE-based force-exit floor (typically around 1¢ = −67%). Setting
+    # to 0 disables the gate. See scripts/backtest_penny.py for the
+    # break-even hit-rate math.
+    penny_stop_loss_multiple: float = 0.5
 
     fee_bps: float = 0.0
     execution_maker_min_edge: float = 0.04
@@ -395,6 +402,14 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "min": 0.1,
         "max": 100,
         "step": 0.1,
+        "group": "paper",
+    },
+    "penny_stop_loss_multiple": {
+        "label": "Penny Stop-Loss Multiple (× entry)",
+        "type": "number",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
         "group": "paper",
     },
     "paper_take_profit_pct": {

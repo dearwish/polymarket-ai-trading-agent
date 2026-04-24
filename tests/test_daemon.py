@@ -2170,6 +2170,58 @@ def test_penny_take_profit_closes_at_tp_multiple(tmp_path: Path) -> None:
     assert closed[0].realized_pnl > 0.5
 
 
+def test_penny_stop_loss_fires_before_force_exit(tmp_path: Path) -> None:
+    """Open penny at 2¢. Tick 2 has bid_no = 0.01 (50% loss of entry
+    2¢). With penny_stop_loss_multiple=0.5 the SL must fire at the
+    threshold instead of waiting for TTE-based force-exit — so the
+    reason is penny_stop_loss, not penny_force_exit.
+    """
+    runner, service, candidate, state = _penny_runner(tmp_path, ask_no=0.02)
+    runner.settings = runner.settings.model_copy(update={"penny_stop_loss_multiple": 0.5})
+    ctx_open = _penny_context(runner, candidate, state, ask_yes=0.98, ask_no=0.02, seconds_to_expiry=500)
+    asyncio.run(runner._handle_penny_strategy(ctx_open))
+    assert service.portfolio.list_open_positions(strategy_id="penny")
+
+    # NO bid drops to 0.009 (below 50% of entry 0.02). TTE is still 400s
+    # so force-exit gate cannot be confused with SL.
+    state.apply_book_snapshot({
+        "asset_id": "no-tok",
+        "bids": [{"price": "0.009", "size": "500"}],
+        "asks": [{"price": "0.015", "size": "500"}],
+    })
+    ctx_sl = _penny_context(runner, candidate, state, ask_yes=0.985, ask_no=0.015, seconds_to_expiry=400)
+    asyncio.run(runner._handle_penny_strategy(ctx_sl))
+
+    closed = service.portfolio.list_closed_positions(limit=10)
+    assert len(closed) == 1
+    assert closed[0].close_reason == "penny_stop_loss"
+
+
+def test_penny_stop_loss_disabled_when_multiple_is_zero(tmp_path: Path) -> None:
+    """Setting penny_stop_loss_multiple=0 must opt out of the SL gate,
+    leaving only TP + TTE force-exit as close reasons. Validates the
+    "disabled" contract so operators can turn it off live.
+    """
+    runner, service, candidate, state = _penny_runner(tmp_path, ask_no=0.02)
+    runner.settings = runner.settings.model_copy(update={"penny_stop_loss_multiple": 0.0})
+    ctx_open = _penny_context(runner, candidate, state, ask_yes=0.98, ask_no=0.02, seconds_to_expiry=500)
+    asyncio.run(runner._handle_penny_strategy(ctx_open))
+    assert service.portfolio.list_open_positions(strategy_id="penny")
+
+    # Even with bid at 0.005 (75% below entry), no SL fires because the
+    # gate is disabled. TTE still 400s, so force-exit also doesn't fire.
+    state.apply_book_snapshot({
+        "asset_id": "no-tok",
+        "bids": [{"price": "0.005", "size": "500"}],
+        "asks": [{"price": "0.015", "size": "500"}],
+    })
+    ctx = _penny_context(runner, candidate, state, ask_yes=0.985, ask_no=0.015, seconds_to_expiry=400)
+    asyncio.run(runner._handle_penny_strategy(ctx))
+
+    assert len(service.portfolio.list_closed_positions(limit=10)) == 0
+    assert len(service.portfolio.list_open_positions(strategy_id="penny")) == 1
+
+
 def test_penny_force_exit_triggers_when_tte_expires(tmp_path: Path) -> None:
     """Open penny position + TTE drops to 90s (< force_exit_tte=120s) →
     close at current bid regardless of TP, reason = penny_force_exit.

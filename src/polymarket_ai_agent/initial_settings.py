@@ -75,6 +75,9 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     "penny_force_exit_tte_seconds": 120,
     "penny_tp_multiple": 2.0,
     "penny_size_usd": 1.0,
+    # Stop-loss as a fraction of entry. 0.5 caps each loser at −50%
+    # instead of the TTE-floor of roughly −67% (observed live 2026-04-24).
+    "penny_stop_loss_multiple": 0.5,
     "fee_bps": 0.0,
     # --- Quant scorer gates ---
     "quant_invert_drift": False,

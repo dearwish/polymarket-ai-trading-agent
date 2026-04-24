@@ -1205,11 +1205,21 @@ class DaemonRunner:
                 bid = features.bid_no or features.mid_no or 0.0
             entry_price = float(open_pos.entry_price)
             tp_multiple = float(settings.penny_tp_multiple)
+            sl_multiple = float(settings.penny_stop_loss_multiple)
             force_exit_tte = int(settings.penny_force_exit_tte_seconds)
             tp_target = entry_price * tp_multiple
+            sl_target = entry_price * sl_multiple
             close_reason: str | None = None
             if bid > 0.0 and bid >= tp_target:
                 close_reason = "penny_take_profit"
+            elif sl_multiple > 0.0 and 0.0 < bid <= sl_target:
+                # Observed 2026-04-24: losers drift from entry 3¢ to a 1¢
+                # floor over 4-8 minutes before the TTE force-exit fires.
+                # Clipping at sl_multiple × entry caps the damage earlier
+                # without meaningfully cutting winners (winners hit TP
+                # fast — 34s in the first observed TP run — so they rarely
+                # spend time this deep in the red).
+                close_reason = "penny_stop_loss"
             elif force_exit_tte > 0 and tte_seconds <= force_exit_tte:
                 close_reason = "penny_force_exit"
             if close_reason is not None:
