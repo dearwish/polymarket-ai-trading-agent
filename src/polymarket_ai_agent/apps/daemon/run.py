@@ -30,6 +30,7 @@ from polymarket_ai_agent.engine.execution.paper_maker import (
     maker_limit_price,
 )
 from polymarket_ai_agent.engine.maker_rewards import estimate_reward_per_100
+from polymarket_ai_agent.engine.overreaction_scoring import OverreactionScorer
 from polymarket_ai_agent.engine.penny_scoring import PENNY_STRATEGY_TAG, PennyScorer
 from polymarket_ai_agent.engine.market_state import MarketFeatures, MarketState
 from polymarket_ai_agent.engine.quant_scoring import QuantScoringEngine
@@ -238,12 +239,20 @@ class DaemonRunner:
             entry_thresh=float(settings.penny_entry_thresh),
             min_entry_tte_seconds=int(settings.penny_min_entry_tte_seconds),
         )
+        self.adaptive_v2 = OverreactionScorer(
+            overreaction_threshold=float(settings.adaptive_v2_overreaction_threshold),
+            sensitivity=float(settings.adaptive_v2_sensitivity),
+            cost_floor=float(settings.adaptive_v2_cost_floor),
+            min_seconds_to_expiry=int(settings.adaptive_v2_min_seconds_to_expiry),
+        )
         self._strategies: list[StrategyConfig] = [
             StrategyConfig(strategy_id=_DEFAULT_STRATEGY_ID, scorer=self.quant),
             StrategyConfig(strategy_id="adaptive", scorer=self.adaptive),
         ]
         if settings.penny_enabled:
             self._strategies.append(StrategyConfig(strategy_id="penny", scorer=self.penny))
+        if settings.adaptive_v2_enabled:
+            self._strategies.append(StrategyConfig(strategy_id="adaptive_v2", scorer=self.adaptive_v2))
         self.heartbeat = HeartbeatWriter(settings.heartbeat_path)
         self._market_states: dict[str, MarketState] = {}
         self._candidates: dict[str, MarketCandidate] = {}
@@ -1775,11 +1784,23 @@ class DaemonRunner:
             entry_thresh=float(new_settings.penny_entry_thresh),
             min_entry_tte_seconds=int(new_settings.penny_min_entry_tte_seconds),
         )
-        # Toggle penny in/out of the strategy list in place — preserves
-        # fade + adaptive at indexes 0/1 so nothing else reshuffles.
-        self._strategies = [s for s in self._strategies if s.strategy_id != "penny"]
+        # Same pattern for adaptive_v2 (overreaction-fade).
+        self.adaptive_v2 = OverreactionScorer(
+            overreaction_threshold=float(new_settings.adaptive_v2_overreaction_threshold),
+            sensitivity=float(new_settings.adaptive_v2_sensitivity),
+            cost_floor=float(new_settings.adaptive_v2_cost_floor),
+            min_seconds_to_expiry=int(new_settings.adaptive_v2_min_seconds_to_expiry),
+        )
+        # Toggle penny + adaptive_v2 in/out of the strategy list in place —
+        # preserves fade + adaptive at indexes 0/1 so nothing else reshuffles.
+        self._strategies = [
+            s for s in self._strategies
+            if s.strategy_id not in ("penny", "adaptive_v2")
+        ]
         if new_settings.penny_enabled:
             self._strategies.append(StrategyConfig(strategy_id="penny", scorer=self.penny))
+        if new_settings.adaptive_v2_enabled:
+            self._strategies.append(StrategyConfig(strategy_id="adaptive_v2", scorer=self.adaptive_v2))
 
     async def _maintenance_loop(self, stop_event: asyncio.Event) -> None:
         """Periodic retention + WAL checkpoint + VACUUM-lite upkeep.

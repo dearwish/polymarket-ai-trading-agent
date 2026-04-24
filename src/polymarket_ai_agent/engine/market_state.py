@@ -141,6 +141,11 @@ class MarketFeatures:
     ask_levels_yes: list[tuple[float, float]] = field(default_factory=list)
     bid_levels_no: list[tuple[float, float]] = field(default_factory=list)
     ask_levels_no: list[tuple[float, float]] = field(default_factory=list)
+    # YES-mid change in basis points over the last 30 seconds, computed
+    # from MarketState's rolling mid-history. Consumed by the
+    # overreaction-fade scorer; zero until the market has accumulated at
+    # least one earlier sample.
+    recent_mid_change_bps_30s: float = 0.0
 
 
 class MarketState:
@@ -159,6 +164,8 @@ class MarketState:
         no_token_id: str,
         trade_tape_max: int = 256,
         signed_flow_window_seconds: float = 5.0,
+        mid_history_max: int = 2048,
+        mid_history_window_seconds: float = 300.0,
     ):
         self.market_id = market_id
         self.yes_token_id = yes_token_id
@@ -167,6 +174,12 @@ class MarketState:
         self.no_book = TokenBook(asset_id=no_token_id)
         self.trade_tape: deque[tuple[datetime, str, float, float, str]] = deque(maxlen=trade_tape_max)
         self._signed_flow_window_seconds = max(1.0, signed_flow_window_seconds)
+        # Rolling (t, mid_yes) samples used by ``mid_change_bps`` for the
+        # overreaction-fade scorer. Appended on every book/price mutation,
+        # not every call, so scorers reading short windows get tick-level
+        # resolution without re-scanning the trade tape.
+        self._mid_history: deque[tuple[datetime, float]] = deque(maxlen=mid_history_max)
+        self._mid_history_window_seconds = max(1.0, mid_history_window_seconds)
         self.last_update: datetime = _utc_now()
 
     def apply_book_snapshot(self, payload: dict[str, Any]) -> None:
@@ -180,6 +193,7 @@ class MarketState:
         book.asks.replace_levels(asks)
         book.last_update = _utc_now()
         self.last_update = book.last_update
+        self._sample_mid(book.last_update)
 
     def apply_price_change(self, payload: dict[str, Any]) -> None:
         asset_id = str(payload.get("asset_id") or "")
@@ -204,6 +218,61 @@ class MarketState:
                 target.apply_change(price, size)
         book.last_update = _utc_now()
         self.last_update = book.last_update
+        self._sample_mid(book.last_update)
+
+    def _sample_mid(self, ts: datetime) -> None:
+        """Record a ``(ts, yes_mid)`` sample for the overreaction scorer.
+
+        Called on every book/price mutation — NOT on every tick read — so
+        the resolution matches the websocket event stream, not the decision
+        cadence. We prune samples older than ``mid_history_window_seconds``
+        so the deque stays bounded even if the market is very active.
+        """
+        mid = self.yes_book.mid()
+        if mid <= 0.0:
+            return
+        self._mid_history.append((ts, mid))
+        cutoff = ts.timestamp() - self._mid_history_window_seconds
+        while self._mid_history and self._mid_history[0][0].timestamp() < cutoff:
+            self._mid_history.popleft()
+
+    def mid_change_bps(
+        self,
+        window_seconds: float,
+        now: datetime | None = None,
+    ) -> float:
+        """Return the YES-mid change in basis points over the last
+        ``window_seconds``. Positive = mid went up. Returns 0 when the
+        history is too short or we can't find a sample inside the window.
+
+        Uses the most recent sample AT OR BEFORE ``now - window_seconds`` as
+        the reference. If the market's only seen ticks in the last half of
+        the window, the reference is the oldest available sample (so we
+        under-report magnitude rather than inventing a move).
+        """
+        if not self._mid_history:
+            return 0.0
+        current = now or _utc_now()
+        latest_ts, latest_mid = self._mid_history[-1]
+        if latest_mid <= 0.0:
+            return 0.0
+        cutoff = current.timestamp() - max(0.0, window_seconds)
+        reference_mid = latest_mid
+        # Walk back from the newest sample to find the first one older than
+        # the cutoff. The deque is small (≤2048) so this linear scan is
+        # cheap compared to the cost of another priority-queue structure.
+        for ts, mid in reversed(self._mid_history):
+            if ts.timestamp() <= cutoff and mid > 0.0:
+                reference_mid = mid
+                break
+        else:
+            # Window reaches before our oldest sample — use oldest available.
+            oldest_ts, oldest_mid = self._mid_history[0]
+            if oldest_mid > 0.0:
+                reference_mid = oldest_mid
+        if reference_mid <= 0.0:
+            return 0.0
+        return round((latest_mid - reference_mid) / reference_mid * 10_000.0, 4)
 
     def apply_last_trade(self, payload: dict[str, Any]) -> None:
         asset_id = str(payload.get("asset_id") or "")
@@ -289,4 +358,5 @@ class MarketState:
             ask_levels_yes=self.yes_book.asks.sorted_levels()[:top_n],
             bid_levels_no=self.no_book.bids.sorted_levels()[:top_n],
             ask_levels_no=self.no_book.asks.sorted_levels()[:top_n],
+            recent_mid_change_bps_30s=self.mid_change_bps(30.0, now=current),
         )

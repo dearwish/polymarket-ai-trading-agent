@@ -78,6 +78,15 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     # Stop-loss as a fraction of entry. 0.5 caps each loser at −50%
     # instead of the TTE-floor of roughly −67% (observed live 2026-04-24).
     "penny_stop_loss_multiple": 0.5,
+    # Adaptive V2 — overreaction-fade. Default threshold 2% (mid moved
+    # 2%+ faster than BTC justifies); sensitivity 10 = a 1% BTC move is
+    # "expected" to move mid 10 percentage points, calibrated roughly
+    # from the GBM derivative at a 0.5-mid 5-min market.
+    "adaptive_v2_enabled": True,
+    "adaptive_v2_overreaction_threshold": 0.02,
+    "adaptive_v2_sensitivity": 10.0,
+    "adaptive_v2_cost_floor": 0.005,
+    "adaptive_v2_min_seconds_to_expiry": 60,
     "fee_bps": 0.0,
     # --- Quant scorer gates ---
     "quant_invert_drift": False,

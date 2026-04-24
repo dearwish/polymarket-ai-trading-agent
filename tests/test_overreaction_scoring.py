@@ -1,0 +1,178 @@
+"""Unit tests for :class:`OverreactionScorer` (adaptive_v2).
+
+The scorer is a pure function of the packet; these tests lock in the
+overreaction formula + gate contract so future tuning doesn't silently
+flip the decision surface.
+"""
+from __future__ import annotations
+
+from polymarket_ai_agent.engine.overreaction_scoring import (
+    OVERREACTION_TAG,
+    OverreactionScorer,
+)
+from polymarket_ai_agent.types import EvidencePacket, SuggestedSide
+
+
+def _packet(**overrides) -> EvidencePacket:
+    defaults = dict(
+        market_id="m",
+        question="",
+        resolution_criteria="",
+        market_probability=0.5,
+        orderbook_midpoint=0.5,
+        spread=0.02,
+        depth_usd=500.0,
+        seconds_to_expiry=600,
+        external_price=70000.0,
+        recent_price_change_bps=0.0,
+        recent_trade_count=0,
+        reasons_context=[],
+        citations=[],
+        bid_yes=0.49,
+        ask_yes=0.51,
+        bid_no=0.49,
+        ask_no=0.51,
+        btc_log_return_5m=0.0,
+        realized_vol_30m=0.003,
+    )
+    defaults.update(overrides)
+    return EvidencePacket(**defaults)
+
+
+def test_fades_upward_overreaction_by_betting_no() -> None:
+    """PM mid jumped +4% (400 bps) while BTC only moved +0.1% (which at
+    sensitivity=10 justifies a +1% mid move). Excess is +3%, above the
+    2% threshold → bet NO, expecting the mid to mean-revert down.
+    """
+    scorer = OverreactionScorer(overreaction_threshold=0.02, sensitivity=10.0)
+    packet = _packet(recent_price_change_bps=400.0, btc_log_return_5m=0.001)
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.NO
+    assert result.raw_model_output == OVERREACTION_TAG
+    # fair_probability should be BELOW current mid (we think mid will fall)
+    assert result.fair_probability < packet.orderbook_midpoint
+    # Edge should be |overreaction| − cost_floor > 0
+    assert result.edge > 0.0
+    assert result.edge_no == result.edge
+
+
+def test_fades_downward_overreaction_by_betting_yes() -> None:
+    """PM mid dropped −4% while BTC only moved −0.1% (justifies −1%).
+    Excess is −3%, |excess|=3% > 2% threshold → bet YES (expect bounce).
+    """
+    scorer = OverreactionScorer(overreaction_threshold=0.02, sensitivity=10.0)
+    packet = _packet(recent_price_change_bps=-400.0, btc_log_return_5m=-0.001)
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.YES
+    assert result.fair_probability > packet.orderbook_midpoint
+    assert result.edge_yes == result.edge
+    assert result.edge_no == 0.0
+
+
+def test_abstains_when_excess_below_threshold() -> None:
+    """PM moved +1%, BTC moved +0.08% × sensitivity 10 → expected +0.8%.
+    Excess is 0.2% — below the 2% threshold — so ABSTAIN even though
+    technically the mid overshot.
+    """
+    scorer = OverreactionScorer(overreaction_threshold=0.02, sensitivity=10.0)
+    packet = _packet(recent_price_change_bps=100.0, btc_log_return_5m=0.0008)
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.ABSTAIN
+    assert any("threshold" in r for r in result.reasons_to_abstain)
+
+
+def test_abstains_when_pm_move_matches_btc_justification() -> None:
+    """PM moved exactly as BTC justifies (zero excess) — no signal, abstain.
+    Sanity guard against firing on any motion.
+    """
+    scorer = OverreactionScorer(overreaction_threshold=0.02, sensitivity=10.0)
+    # pm_move = 0.01 = 100 bps; btc_move = 0.001; expected = 0.01 → zero excess
+    packet = _packet(recent_price_change_bps=100.0, btc_log_return_5m=0.001)
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.ABSTAIN
+
+
+def test_abstains_on_pre_market() -> None:
+    scorer = OverreactionScorer()
+    packet = _packet(
+        recent_price_change_bps=400.0,
+        btc_log_return_5m=0.001,
+        is_pre_market=True,
+    )
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.ABSTAIN
+    assert any("pre-market" in r.lower() for r in result.reasons_to_abstain)
+
+
+def test_abstains_when_no_data_yet() -> None:
+    """Cold-start tick — both PM and BTC deltas are 0. The scorer must
+    not fire (both being 0 is a missing-history sentinel, not a signal).
+    """
+    scorer = OverreactionScorer()
+    packet = _packet(recent_price_change_bps=0.0, btc_log_return_5m=0.0)
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.ABSTAIN
+
+
+def test_abstains_when_tte_too_short_for_reversion() -> None:
+    """A genuine overreaction with only 30s TTE has no reversion window;
+    we'd just catch the last minute's noise spike. Abstain.
+    """
+    scorer = OverreactionScorer(min_seconds_to_expiry=60)
+    packet = _packet(
+        recent_price_change_bps=400.0,
+        btc_log_return_5m=0.001,
+        seconds_to_expiry=30,
+    )
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.ABSTAIN
+    assert any("TTE" in r for r in result.reasons_to_abstain)
+
+
+def test_abstains_when_excess_does_not_recover_cost_floor() -> None:
+    """Excess just above threshold but below cost_floor means the edge
+    is zero or negative after fees — abstain rather than trade to a loss.
+    """
+    # threshold 0.02, cost_floor 0.03 → need |excess| > 0.03 to get edge > 0.
+    scorer = OverreactionScorer(
+        overreaction_threshold=0.02, sensitivity=10.0, cost_floor=0.03
+    )
+    # Excess = 0.025 → above threshold (0.02) but below cost_floor (0.03).
+    # pm=350 bps (0.035), btc_implied=100 bps (0.01) → excess=0.025.
+    packet = _packet(recent_price_change_bps=350.0, btc_log_return_5m=0.001)
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.ABSTAIN
+    assert any("cost_floor" in r for r in result.reasons_to_abstain)
+
+
+def test_fair_probability_clamps_to_valid_range() -> None:
+    """Extreme overreaction at an already-extreme mid should clamp fair
+    into [0.01, 0.99] rather than producing an invalid probability.
+    """
+    scorer = OverreactionScorer(overreaction_threshold=0.02, sensitivity=10.0)
+    # Current mid 0.95, pm jumped +10% (already saturating) — fair for NO
+    # bet would be 0.95 − 0.10 = 0.85, which is fine. Flip the other way:
+    # mid 0.95, pm dropped −15%, btc only −0.1% → excess=−0.14, fair_yes =
+    # 0.95 + 0.14 = 1.09 → must clamp to 0.99.
+    packet = _packet(
+        orderbook_midpoint=0.95,
+        recent_price_change_bps=-1500.0,
+        btc_log_return_5m=-0.001,
+    )
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.YES
+    assert result.fair_probability <= 0.99
+
+
+def test_raw_model_output_always_tagged() -> None:
+    """Every branch (approved + abstain) carries OVERREACTION_TAG so the
+    daemon's strategy routing and analyze_soak can attribute decisions
+    to this scorer without a side-channel lookup.
+    """
+    scorer = OverreactionScorer()
+    approved = scorer.score_market(
+        _packet(recent_price_change_bps=400.0, btc_log_return_5m=0.001)
+    )
+    abstained = scorer.score_market(_packet())
+    assert approved.raw_model_output == OVERREACTION_TAG
+    assert abstained.raw_model_output == OVERREACTION_TAG

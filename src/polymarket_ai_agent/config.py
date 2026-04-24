@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     # to 0 disables the gate. See scripts/backtest_penny.py for the
     # break-even hit-rate math.
     penny_stop_loss_multiple: float = 0.5
+    # Overreaction-fade strategy (adaptive_v2). Runs as a third scorer
+    # alongside fade + penny; orthogonal signal: detects Polymarket mid
+    # moves that outpace BTC's justification and bets the reversion. See
+    # engine/overreaction_scoring.py for the full thesis.
+    adaptive_v2_enabled: bool = True
+    adaptive_v2_overreaction_threshold: float = 0.02
+    adaptive_v2_sensitivity: float = 10.0
+    adaptive_v2_cost_floor: float = 0.005
+    adaptive_v2_min_seconds_to_expiry: int = 60
 
     fee_bps: float = 0.0
     execution_maker_min_edge: float = 0.04
@@ -410,6 +419,43 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 1,
         "step": 0.05,
+        "group": "paper",
+    },
+    "adaptive_v2_enabled": {
+        "label": "Adaptive V2 (Overreaction-Fade) Enabled",
+        "type": "boolean",
+        "group": "paper",
+    },
+    "adaptive_v2_overreaction_threshold": {
+        "label": "Adaptive V2 Overreaction Threshold",
+        "type": "number",
+        "min": 0,
+        "max": 0.5,
+        "step": 0.005,
+        "group": "paper",
+    },
+    "adaptive_v2_sensitivity": {
+        "label": "Adaptive V2 BTC→PM Sensitivity",
+        "type": "number",
+        "min": 0.5,
+        "max": 50,
+        "step": 0.5,
+        "group": "paper",
+    },
+    "adaptive_v2_cost_floor": {
+        "label": "Adaptive V2 Cost Floor (edge subtracted)",
+        "type": "number",
+        "min": 0,
+        "max": 0.1,
+        "step": 0.001,
+        "group": "paper",
+    },
+    "adaptive_v2_min_seconds_to_expiry": {
+        "label": "Adaptive V2 Min TTE (seconds)",
+        "type": "number",
+        "min": 0,
+        "max": 900,
+        "step": 10,
         "group": "paper",
     },
     "paper_take_profit_pct": {

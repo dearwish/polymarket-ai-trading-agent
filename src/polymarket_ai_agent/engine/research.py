@@ -109,7 +109,7 @@ class ResearchEngine:
             depth_usd=features.depth_usd_yes,
             seconds_to_expiry=seconds_to_expiry,
             external_price=btc_price,
-            recent_price_change_bps=0.0,
+            recent_price_change_bps=features.recent_mid_change_bps_30s,
             recent_trade_count=features.trade_count_5s,
             reasons_context=context,
             citations=citations,

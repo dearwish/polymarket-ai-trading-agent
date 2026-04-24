@@ -1,0 +1,179 @@
+"""Overreaction-fade scorer (adaptive_v2).
+
+Thesis: the fade (GBM) scorer captures *static* disagreement between
+Polymarket's mid and the model's fair value. A separate edge exists in
+*dynamic* disagreement — when Polymarket's mid moves faster than BTC's
+spot move justifies, makers are chasing noise. The mid mean-reverts
+toward the BTC-implied level on the next few ticks.
+
+Signal construction:
+  - ``pm_move = recent_price_change_bps / 10_000``       (30s Polymarket delta)
+  - ``btc_move = btc_log_return_5m``                     (BTC spot delta, same direction)
+  - ``expected_pm_move = btc_move × sensitivity``        (how much PM *should* move)
+  - ``overreaction = pm_move − expected_pm_move``        (excess move)
+
+``sensitivity`` is the conversion from BTC log-return to Polymarket mid
+change. At the money (fair=0.5) a 1 % BTC move commonly shifts mid by
+5–15 probability points; at the tails the mid barely moves. We take a
+fixed calibration constant for simplicity — the alpha is the *sign and
+magnitude of the excess*, not the exact coefficient.
+
+Decision:
+  - ``|overreaction| < overreaction_threshold``  →  ABSTAIN
+  - ``overreaction > 0``  (mid jumped too far up)  →  bet NO  (expect pullback)
+  - ``overreaction < 0``  (mid dropped too far)    →  bet YES (expect bounce)
+  - ``edge = |overreaction| − cost_floor``         (transacted profit estimate)
+
+The scorer is stateless; every call is a pure function of the packet.
+All gates (min_edge, min_depth, max_spread, stale_data, TTE buffer,
+correlation caps) downstream in the risk engine still apply — this just
+replaces the scorer's directional pick.
+"""
+from __future__ import annotations
+
+from polymarket_ai_agent.types import EvidencePacket, MarketAssessment, SuggestedSide
+
+
+OVERREACTION_TAG = "overreaction-fade"
+
+
+class OverreactionScorer:
+    """Dynamic-disagreement fade. Orthogonal to the GBM fade scorer — it
+    triggers on *recent* Polymarket mid moves that outpace their BTC
+    justification, where fade triggers on static fair-value gaps.
+
+    Default ``sensitivity=10.0`` means a 1% BTC move is "expected" to
+    drive a 10% mid move (i.e. 10 probability-points). Calibrated roughly
+    from observation: at a 50¢ market with 5 min TTE and ~0.5% 30m vol,
+    dP/d(ln S) ≈ 8–12 per the GBM derivative; 10 is a reasonable center.
+    Tune via settings after we see how it performs.
+    """
+
+    def __init__(
+        self,
+        overreaction_threshold: float = 0.02,
+        sensitivity: float = 10.0,
+        cost_floor: float = 0.005,
+        min_seconds_to_expiry: int = 60,
+    ):
+        self.overreaction_threshold = overreaction_threshold
+        self.sensitivity = sensitivity
+        self.cost_floor = cost_floor
+        self.min_seconds_to_expiry = min_seconds_to_expiry
+
+    def score_market(self, packet: EvidencePacket) -> MarketAssessment:
+        """Return an APPROVED assessment when the packet shows a
+        measurable overreaction, else ABSTAIN with an explanatory reason.
+        """
+        base = _abstain_template(packet)
+
+        # Pre-market candles have stale books and no BTC-vs-PM
+        # relationship yet — the thesis doesn't apply.
+        if packet.is_pre_market:
+            return _with_reason(base, "Overreaction: pre-market — thesis requires a live candle.")
+
+        # We need the mid-history populated (at least one earlier sample)
+        # and a BTC 5m return. Both read zero at cold start; without them
+        # we'd manufacture a bogus overreaction signal from nothing.
+        pm_move = float(packet.recent_price_change_bps) / 10_000.0
+        btc_move = float(packet.btc_log_return_5m or 0.0)
+        if pm_move == 0.0 and btc_move == 0.0:
+            return _with_reason(base, "Overreaction: no mid / BTC delta yet.")
+
+        # Keep away from the last minute — spread blows out, mid is
+        # unreliable, and "reversion" has no time to materialise.
+        if packet.seconds_to_expiry < self.min_seconds_to_expiry:
+            return _with_reason(
+                base,
+                (
+                    f"Overreaction: TTE {packet.seconds_to_expiry}s < min "
+                    f"{self.min_seconds_to_expiry}s — reversion can't fire in time."
+                ),
+            )
+
+        expected_pm_move = btc_move * self.sensitivity
+        overreaction = pm_move - expected_pm_move
+        if abs(overreaction) < self.overreaction_threshold:
+            return _with_reason(
+                base,
+                (
+                    f"Overreaction: |excess|={abs(overreaction):.4f} < threshold "
+                    f"{self.overreaction_threshold:.4f}."
+                ),
+            )
+
+        # Fade the direction of the excess: mid overshot upward → NO;
+        # overshot downward → YES.
+        if overreaction > 0:
+            side = SuggestedSide.NO
+        else:
+            side = SuggestedSide.YES
+
+        edge = abs(overreaction) - self.cost_floor
+        if edge <= 0.0:
+            return _with_reason(
+                base,
+                (
+                    f"Overreaction: |excess|={abs(overreaction):.4f} ≤ cost_floor "
+                    f"{self.cost_floor:.4f}; would not recover fees."
+                ),
+            )
+
+        # Fair-probability for the SCORER's frame — the direction we're
+        # fading toward. If we're buying YES because mid overshot down,
+        # the "fair yes" is higher than the current mid; we express that
+        # by shifting current mid by the edge magnitude, capped in (0,1).
+        current_mid = float(packet.orderbook_midpoint or 0.5)
+        if side is SuggestedSide.YES:
+            fair_yes = max(0.01, min(0.99, current_mid + abs(overreaction)))
+        else:
+            fair_yes = max(0.01, min(0.99, current_mid - abs(overreaction)))
+
+        return MarketAssessment(
+            market_id=packet.market_id,
+            fair_probability=fair_yes,
+            fair_probability_no=round(1.0 - fair_yes, 6),
+            confidence=0.60,
+            suggested_side=side,
+            expiry_risk="LOW",
+            reasons_for_trade=[
+                (
+                    f"Overreaction fade: pm_move={pm_move:+.4f} vs "
+                    f"btc-implied {expected_pm_move:+.4f}, "
+                    f"excess={overreaction:+.4f}; bet {side.value}."
+                )
+            ],
+            reasons_to_abstain=[],
+            edge=edge,
+            edge_yes=edge if side is SuggestedSide.YES else 0.0,
+            edge_no=edge if side is SuggestedSide.NO else 0.0,
+            raw_model_output=OVERREACTION_TAG,
+            slippage_bps=10.0,
+        )
+
+
+def _abstain_template(packet: EvidencePacket) -> MarketAssessment:
+    """Shared ABSTAIN skeleton — every branch fills only reasons_to_abstain."""
+    return MarketAssessment(
+        market_id=packet.market_id,
+        fair_probability=float(packet.orderbook_midpoint or 0.5),
+        fair_probability_no=round(1.0 - float(packet.orderbook_midpoint or 0.5), 6),
+        confidence=0.0,
+        suggested_side=SuggestedSide.ABSTAIN,
+        expiry_risk="UNKNOWN",
+        reasons_for_trade=[],
+        reasons_to_abstain=[],
+        edge=0.0,
+        edge_yes=0.0,
+        edge_no=0.0,
+        raw_model_output=OVERREACTION_TAG,
+        slippage_bps=0.0,
+    )
+
+
+def _with_reason(base: MarketAssessment, reason: str) -> MarketAssessment:
+    """Frozen-dataclass-friendly helper to stamp a single abstain reason
+    onto the shared template without mutating shared state."""
+    from dataclasses import replace
+
+    return replace(base, reasons_to_abstain=[reason, *base.reasons_to_abstain])
