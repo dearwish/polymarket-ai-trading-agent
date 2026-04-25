@@ -106,6 +106,7 @@ class EvidencePacket:
     microprice_yes: float = 0.0
     imbalance_top5_yes: float = 0.0
     signed_flow_5s: float = 0.0
+    btc_log_return_30s: float = 0.0
     btc_log_return_5m: float = 0.0
     btc_log_return_15m: float = 0.0
     realized_vol_30m: float = 0.0

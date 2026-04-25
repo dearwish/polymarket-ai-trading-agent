@@ -75,6 +75,7 @@ class ResearchEngine:
     ) -> EvidencePacket:
         midpoint = features.mid_yes or candidate.implied_probability
         btc_price = btc_snapshot.price if btc_snapshot else 0.0
+        btc_return_30s = btc_snapshot.log_return_30s if btc_snapshot else 0.0
         btc_return_5m = btc_snapshot.log_return_5m if btc_snapshot else 0.0
         btc_return_15m = btc_snapshot.log_return_15m if btc_snapshot else 0.0
         realized_vol_30m = btc_snapshot.realized_vol_30m if btc_snapshot else 0.0
@@ -120,6 +121,7 @@ class ResearchEngine:
             microprice_yes=features.microprice_yes,
             imbalance_top5_yes=features.imbalance_top5_yes,
             signed_flow_5s=features.signed_flow_5s,
+            btc_log_return_30s=btc_return_30s,
             btc_log_return_5m=btc_return_5m,
             btc_log_return_15m=btc_return_15m,
             realized_vol_30m=realized_vol_30m,

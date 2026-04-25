@@ -260,6 +260,7 @@ class DaemonRunner:
             sensitivity=float(settings.adaptive_v2_sensitivity),
             cost_floor=float(settings.adaptive_v2_cost_floor),
             min_seconds_to_expiry=int(settings.adaptive_v2_min_seconds_to_expiry),
+            max_abs_edge=float(settings.adaptive_v2_max_abs_edge),
         )
         self._strategies: list[StrategyConfig] = [
             StrategyConfig(strategy_id=_DEFAULT_STRATEGY_ID, scorer=self.quant),
@@ -718,6 +719,7 @@ class DaemonRunner:
             "last_update_age_seconds": features.last_update_age_seconds,
             "btc_price": btc.price if btc else None,
             "btc_realized_vol_30m": btc.realized_vol_30m if btc else None,
+            "btc_log_return_30s": btc.log_return_30s if btc else None,
             "btc_log_return_5m": btc.log_return_5m if btc else None,
             "btc_log_return_since_candle_open": context.packet.btc_log_return_since_candle_open if context.packet else None,
             "time_elapsed_in_candle_s": context.packet.time_elapsed_in_candle_s if context.packet else None,
@@ -1897,6 +1899,7 @@ class DaemonRunner:
             sensitivity=float(new_settings.adaptive_v2_sensitivity),
             cost_floor=float(new_settings.adaptive_v2_cost_floor),
             min_seconds_to_expiry=int(new_settings.adaptive_v2_min_seconds_to_expiry),
+            max_abs_edge=float(new_settings.adaptive_v2_max_abs_edge),
         )
         # Toggle optional strategies in/out of the list in place, preserving
         # fade at index 0 so the order stays stable.

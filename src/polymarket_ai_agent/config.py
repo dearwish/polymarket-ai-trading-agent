@@ -178,6 +178,12 @@ class Settings(BaseSettings):
     adaptive_v2_sensitivity: float = 10.0
     adaptive_v2_cost_floor: float = 0.005
     adaptive_v2_min_seconds_to_expiry: int = 60
+    # Hard ceiling on |edge| for the overreaction-fade scorer. Mirrors
+    # ``quant_max_abs_edge`` for adaptive_v2: empirically the highest-edge
+    # ticks have been the worst-PnL bucket because they correspond to
+    # *real* (not noise) Polymarket moves the BTC reference hasn't caught
+    # up to yet. 0.0 disables.
+    adaptive_v2_max_abs_edge: float = 0.30
 
     fee_bps: float = 0.0
     execution_maker_min_edge: float = 0.04
@@ -491,6 +497,14 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "max": 900,
         "step": 10,
         "group": "paper",
+    },
+    "adaptive_v2_max_abs_edge": {
+        "label": "Adaptive V2 Max |Edge| Ceiling",
+        "type": "number",
+        "min": 0,
+        "max": 1,
+        "step": 0.01,
+        "group": "thresholds",
     },
     "paper_take_profit_pct": {
         "label": "Paper Take Profit %",
