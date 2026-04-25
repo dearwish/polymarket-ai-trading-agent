@@ -237,7 +237,12 @@ type DaemonHeartbeatPayload = {
     market_family: string;
     active_market_ids: string[];
     active_market_slugs?: Record<string, string>;
-    position_extras?: Record<string, { peak_price?: number; tranches_closed?: number; original_size_usd?: number }>;
+    // Nested shape: { strategy_id: { market_id: extras } }. Flat shape
+    // (Record<market_id, extras>) is still emitted as ``position_extras_flat``
+    // for backwards compatibility, but the UI prefers the nested form so
+    // adaptive_v2 / penny / fade positions on the same market don't collide.
+    position_extras?: Record<string, Record<string, { peak_price?: number; tranches_closed?: number; original_size_usd?: number }>>;
+    position_extras_flat?: Record<string, { peak_price?: number; tranches_closed?: number; original_size_usd?: number }>;
     paper_trailing_stop_pct?: number;
     paper_trail_arm_pct?: number;
   } | null;
@@ -1333,9 +1338,13 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
   // visible instead of whichever scorer happened to fire last.
   const marketStrategyLookup = buildMarketStrategyLookup(daemonTicks);
   // Daemon-provided trail state (peak_price, etc.) + the trail settings so we
-  // can compute each open position's live trailing-stop level.
+  // can compute each open position's live trailing-stop level. The nested
+  // shape ({strategy: {market: extras}}) is preferred so the same market on
+  // different strategies doesn't collide; we fall back to the flat shape if
+  // a daemon predating the nested heartbeat is talking to a fresh dashboard.
   const hb = heartbeat?.heartbeat ?? null;
   const positionExtras = hb?.position_extras ?? {};
+  const positionExtrasFlat = hb?.position_extras_flat ?? {};
   const trailPct = hb?.paper_trailing_stop_pct ?? 0;
   const trailArmPct = hb?.paper_trail_arm_pct ?? 0;
   // (strategy_id, market_id) pairs with an open position — used by
@@ -1667,7 +1676,12 @@ function PortfolioPage({ summary, positions, openPositions, equityCurve, daemonT
                   // once armed (peak ≥ entry × (1 + arm_pct)). Entry floor mirrors
                   // the daemon so a freshly-armed trail can't fire at a loss.
                   let trailCell: ReactNode = <span style={{ color: "var(--muted)" }}>—</span>;
-                  const extras = positionExtras[position.market_id];
+                  const positionStrategy = position.strategy_id ?? "fade";
+                  // Prefer the nested per-(strategy, market) lookup; fall back
+                  // to the legacy flat dict if the daemon is older.
+                  const extras =
+                    positionExtras[positionStrategy]?.[position.market_id]
+                    ?? positionExtrasFlat[position.market_id];
                   if (trailPct > 0 && extras && extras.peak_price && position.entry_price > 0) {
                     const peak = extras.peak_price;
                     const armThreshold = position.entry_price * (1 + trailArmPct);

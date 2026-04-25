@@ -77,6 +77,20 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _nest_position_extras(
+    extras_by_pair: dict[tuple[str, str], dict[str, float]],
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Group ``self._position_extras`` (keyed on ``(strategy_id, market_id)``)
+    into the nested ``{strategy_id: {market_id: extras}}`` shape that the
+    dashboard expects, so every strategy's trail state survives the heartbeat
+    serialisation (not just ``fade``).
+    """
+    nested: dict[str, dict[str, dict[str, float]]] = {}
+    for (strategy_id, market_id), extras in extras_by_pair.items():
+        nested.setdefault(strategy_id, {})[market_id] = dict(extras)
+    return nested
+
+
 @dataclass(slots=True)
 class DaemonMetrics:
     started_at: datetime = field(default_factory=_utc_now)
@@ -1742,15 +1756,20 @@ class DaemonRunner:
                     "safety_stop_reason": self.metrics.safety_stop_reason,
                     "market_family": self.settings.market_family,
                     # Per-open-position trail state. Lets the dashboard render the
-                    # live trailing-stop level alongside the Mark column.
-                    # Phase 1 emits only the default-strategy slice (flat shape)
-                    # so the web UI's ``positionExtras[market_id]`` indexing
-                    # keeps working. Phase 2 will switch to a nested shape when
-                    # multiple strategies run concurrently.
-                    "position_extras": {
+                    # Live trailing-stop / TP-ladder state per (strategy, market).
+                    # Nested shape so the dashboard can look up extras by both
+                    # dimensions (a position on adaptive_v2 doesn't share state
+                    # with a position on fade for the same market). Schema:
+                    #   { strategy_id: { market_id: { peak_price, ... } } }
+                    "position_extras": _nest_position_extras(self._position_extras),
+                    # Flat shape kept for backwards compatibility with any
+                    # consumer still indexing by market_id only — collapses all
+                    # strategies onto market_id; if multiple strategies hold the
+                    # same market, last-write wins. Will be removed once all
+                    # consumers read the nested form.
+                    "position_extras_flat": {
                         market_id: dict(extras)
-                        for (strategy_id, market_id), extras in self._position_extras.items()
-                        if strategy_id == _DEFAULT_STRATEGY_ID
+                        for (_strategy_id, market_id), extras in self._position_extras.items()
                     },
                     "paper_trailing_stop_pct": float(self.settings.paper_trailing_stop_pct),
                     "paper_trail_arm_pct": float(self.settings.paper_trail_arm_pct),

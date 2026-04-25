@@ -2340,6 +2340,30 @@ def test_daemon_tick_records_trigger_reason(tmp_path: Path) -> None:
     assert set(triggers_metric.keys()).issubset({"book", "price_change"})
 
 
+def test_nest_position_extras_groups_by_strategy_then_market() -> None:
+    """The heartbeat needs the nested {strategy: {market: extras}} shape so
+    the dashboard can render trail state for non-fade strategies (a
+    long-standing phase-1 bug previously emitted only fade extras).
+    """
+    from polymarket_ai_agent.apps.daemon.run import _nest_position_extras
+
+    flat = {
+        ("fade", "m1"): {"peak_price": 0.6, "tranches_closed": 0.0},
+        ("adaptive_v2", "m1"): {"peak_price": 0.91},
+        ("adaptive_v2", "m2"): {"peak_price": 0.55},
+        ("penny", "m3"): {"peak_price": 0.04},
+    }
+    nested = _nest_position_extras(flat)
+    assert set(nested.keys()) == {"fade", "adaptive_v2", "penny"}
+    assert set(nested["adaptive_v2"].keys()) == {"m1", "m2"}
+    # Same market on two strategies must NOT collide.
+    assert nested["fade"]["m1"]["peak_price"] == 0.6
+    assert nested["adaptive_v2"]["m1"]["peak_price"] == 0.91
+    # Inner dicts are copies, not aliases.
+    nested["adaptive_v2"]["m1"]["peak_price"] = 1.0
+    assert flat[("adaptive_v2", "m1")]["peak_price"] == 0.91
+
+
 def test_apply_candidates_pins_open_position_market_when_dropped(tmp_path: Path) -> None:
     """A market that drops out of discovery while we hold a paper position
     must be re-pinned to the active set instead of orphan-closed, so the
