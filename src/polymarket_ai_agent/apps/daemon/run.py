@@ -77,6 +77,37 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _serialize_pending_makers(
+    pending: dict[tuple[str, str], "PaperMakerOrder"],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Render ``_pending_makers`` for the dashboard heartbeat.
+
+    Resting limits aren't persisted to SQLite (they live only in daemon
+    memory until they fill, expire, or get cancelled), so the heartbeat
+    is the only operator-facing surface for them. Each row carries the
+    placement details the operator needs to judge "why hasn't this
+    filled?": limit_price, age, ttl_remaining_seconds.
+    """
+    rows: list[dict[str, Any]] = []
+    for (strategy_id, market_id), order in pending.items():
+        age_seconds = (now - order.placed_at).total_seconds()
+        rows.append({
+            "strategy_id": strategy_id,
+            "market_id": market_id,
+            "side": order.side.value,
+            "limit_price": order.limit_price,
+            "size_usd": order.size_usd,
+            "placed_at": order.placed_at.isoformat(),
+            "ttl_seconds": order.ttl_seconds,
+            "age_seconds": round(age_seconds, 2),
+            "ttl_remaining_seconds": round(
+                max(0.0, order.ttl_seconds - age_seconds), 2
+            ),
+        })
+    return rows
+
+
 def _nest_position_extras(
     extras_by_pair: dict[tuple[str, str], dict[str, float]],
 ) -> dict[str, dict[str, dict[str, float]]]:
@@ -1776,6 +1807,12 @@ class DaemonRunner:
                     },
                     "paper_trailing_stop_pct": float(self.settings.paper_trailing_stop_pct),
                     "paper_trail_arm_pct": float(self.settings.paper_trail_arm_pct),
+                    # Resting paper-maker limits. Lives only in daemon
+                    # memory; the heartbeat is the dashboard's sole window
+                    # into "what limits are riding the book right now".
+                    "pending_makers": _serialize_pending_makers(
+                        self._pending_makers, _utc_now()
+                    ),
                 }
                 await asyncio.to_thread(self.heartbeat.write, self.metrics, extra)
             except Exception as exc:

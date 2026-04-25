@@ -176,6 +176,22 @@ type LiveOrdersPayload = {
   orders: LiveOrder[];
 };
 
+type PendingMaker = {
+  strategy_id: string;
+  market_id: string;
+  side: string;
+  limit_price: number;
+  size_usd: number;
+  placed_at: string;
+  ttl_seconds: number;
+  age_seconds: number;
+  ttl_remaining_seconds: number;
+};
+
+type PendingMakersPayload = {
+  orders: PendingMaker[];
+};
+
 type LiveTrade = {
   trade_id: string;
   order_id?: string;
@@ -513,6 +529,7 @@ type DashboardState = {
   daemonHeartbeat: DaemonHeartbeatPayload | null;
   daemonTicks: DaemonTickPayload[];
   paperActivity: PaperActivityEvent[];
+  pendingMakers: PendingMaker[];
 };
 
 type DashboardSnapshotPayload = {
@@ -532,6 +549,7 @@ type DashboardSnapshotPayload = {
   daemon_heartbeat: DaemonHeartbeatPayload;
   daemon_ticks: { ticks: DaemonTickPayload[] };
   paper_activity: PaperActivityPayload;
+  pending_makers: PendingMakersPayload;
 };
 
 const VIEWS: Array<{ key: ViewKey; label: string }> = [
@@ -827,6 +845,7 @@ function mapSnapshotToState(snapshot: DashboardSnapshotPayload): DashboardState 
     daemonHeartbeat: snapshot.daemon_heartbeat ?? null,
     daemonTicks: snapshot.daemon_ticks?.ticks ?? [],
     paperActivity: snapshot.paper_activity?.events ?? [],
+    pendingMakers: snapshot.pending_makers?.orders ?? [],
   };
 }
 
@@ -864,6 +883,8 @@ function applyDashboardDelta(current: DashboardState, eventName: string, payload
       return { ...current, daemonTicks: (payload as { ticks: DaemonTickPayload[] }).ticks };
     case "paper_activity":
       return { ...current, paperActivity: (payload as PaperActivityPayload).events };
+    case "pending_makers":
+      return { ...current, pendingMakers: (payload as PendingMakersPayload).orders };
     default:
       return current;
   }
@@ -1135,7 +1156,7 @@ function EventEntry({
   );
 }
 
-function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradingMode, daemonTicks }: { liveOrders: LiveOrder[]; liveTrades: LiveTrade[]; liveActivity: LiveActivityPayload | null; paperActivity: PaperActivityEvent[]; tradingMode: string; daemonTicks: DaemonTickPayload[] }) {
+function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradingMode, daemonTicks, pendingMakers }: { liveOrders: LiveOrder[]; liveTrades: LiveTrade[]; liveActivity: LiveActivityPayload | null; paperActivity: PaperActivityEvent[]; tradingMode: string; daemonTicks: DaemonTickPayload[]; pendingMakers: PendingMaker[] }) {
   const isLive = tradingMode === "live";
   const { timezone, timeFormat } = useDisplayPrefs();
   const marketLookup = useMemo(() => buildMarketLookup(daemonTicks), [daemonTicks]);
@@ -1266,9 +1287,52 @@ function OrdersPage({ liveOrders, liveTrades, liveActivity, paperActivity, tradi
       <summary>
         <span className="mode-chip">Paper Trading</span>
         {!isLive ? <span className="mode-badge-active">ACTIVE</span> : <span className="mode-badge-idle">idle</span>}
-        <span className="mode-summary-meta">{paperActivity.length} executions</span>
+        <span className="mode-summary-meta">{pendingMakers.length} resting · {paperActivity.length} executions</span>
       </summary>
       <section className="grid">
+      <article className="panel full-span">
+        <div className="panel-header">
+          <h2>Pending Maker Orders</h2>
+          <span>{pendingMakers.length} resting</span>
+        </div>
+        {pendingMakers.length === 0 ? (
+          <div className="empty-state">No resting paper-maker limits. Enable <code>fade_post_only</code> to route fade through the maker lifecycle.</div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Strategy</th>
+                  <th>Market</th>
+                  <th>Side</th>
+                  <th>Limit</th>
+                  <th>Size</th>
+                  <th>Age</th>
+                  <th>TTL Left</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingMakers.map((m) => {
+                  const sideClass = m.side === "YES" ? "positive" : m.side === "NO" ? "negative" : "";
+                  const ttlClass = m.ttl_remaining_seconds < 30 ? "negative" : "";
+                  return (
+                    <tr key={`${m.strategy_id}-${m.market_id}`}>
+                      <td style={{ fontSize: "12px", color: "var(--muted)" }}>{m.strategy_id}</td>
+                      <td><MarketCell marketId={m.market_id} lookup={marketLookup} timezone={timezone} timeFormat={timeFormat} /></td>
+                      <td className={sideClass}>{m.side}</td>
+                      <td>{m.limit_price.toFixed(4)}</td>
+                      <td>{formatMoney(m.size_usd)}</td>
+                      <td>{formatDuration(m.age_seconds)}</td>
+                      <td className={ttlClass}>{formatDuration(m.ttl_remaining_seconds)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </article>
+
       <article className="panel full-span">
         <div className="panel-header">
           <h2>Paper Activity</h2>
@@ -2442,7 +2506,7 @@ export default function App() {
       case "decisions":
         return <DecisionsPage decisions={state.recentDecisions} settings={state.settings} openPositions={state.openPositions?.positions ?? []} />;
       case "orders":
-        return <OrdersPage liveOrders={state.liveOrders} liveTrades={state.liveTrades} liveActivity={state.liveActivity} paperActivity={state.paperActivity} tradingMode={state.status?.trading_mode ?? "paper"} daemonTicks={state.daemonTicks} />;
+        return <OrdersPage liveOrders={state.liveOrders} liveTrades={state.liveTrades} liveActivity={state.liveActivity} paperActivity={state.paperActivity} tradingMode={state.status?.trading_mode ?? "paper"} daemonTicks={state.daemonTicks} pendingMakers={state.pendingMakers} />;
       case "portfolio":
         return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} openPositions={state.openPositions?.positions ?? []} equityCurve={state.equityCurve} daemonTicks={state.daemonTicks} heartbeat={state.daemonHeartbeat} settings={state.settings} />;
       case "events":

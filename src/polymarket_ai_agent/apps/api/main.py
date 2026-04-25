@@ -272,6 +272,17 @@ def create_app(
             "heartbeat": reader.read(),
         }
 
+    def _pending_makers_payload(settings: Settings) -> dict:
+        """Resting paper-maker limits sourced from the heartbeat.
+
+        The daemon owns ``_pending_makers`` in process memory; the API has
+        no direct view, so we surface them via the heartbeat field the
+        daemon writes on every cycle. Empty list if heartbeat is missing.
+        """
+        reader = HeartbeatReader(settings.heartbeat_path)
+        heartbeat = reader.read() or {}
+        return {"orders": heartbeat.get("pending_makers", [])}
+
     def _latest_daemon_ticks(service: AgentService) -> dict:
         # read_recent_events returns file-order (oldest first); iterate newest-first
         # so "first occurrence per (strategy_id, market_id)" is the most recent
@@ -314,6 +325,7 @@ def create_app(
             "daemon_heartbeat": _daemon_heartbeat_payload(service.settings),
             "daemon_ticks": _latest_daemon_ticks(service),
             "paper_activity": paper_activity(limit=30, service=service),
+            "pending_makers": _pending_makers_payload(service.settings),
         }
 
     def streamable_dashboard_sections(service: AgentService) -> dict:
@@ -335,6 +347,7 @@ def create_app(
             "daemon_heartbeat": snapshot["daemon_heartbeat"],
             "daemon_ticks": snapshot["daemon_ticks"],
             "paper_activity": snapshot["paper_activity"],
+            "pending_makers": snapshot["pending_makers"],
         }
 
     @app.get("/api/status")
