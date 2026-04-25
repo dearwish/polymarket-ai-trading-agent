@@ -2340,6 +2340,109 @@ def test_daemon_tick_records_trigger_reason(tmp_path: Path) -> None:
     assert set(triggers_metric.keys()).issubset({"book", "price_change"})
 
 
+def test_apply_candidates_pins_open_position_market_when_dropped(tmp_path: Path) -> None:
+    """A market that drops out of discovery while we hold a paper position
+    must be re-pinned to the active set instead of orphan-closed, so the
+    exit ladder owns the close.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    runner, service, candidate, _approved, _btc = _setup_runner_with_open_yes_position(
+        tmp_path,
+        entry_price=0.50,
+        settings_overrides={},
+    )
+    # Move the market end far into the future so TTE is comfortably positive.
+    pinned_candidate = dataclass_replace(candidate, end_date_iso="2099-01-01T00:00:00Z")
+    runner._candidates[candidate.market_id] = pinned_candidate
+
+    # Discovery returns an empty list — the market dropped out (e.g. fell
+    # below family_min_tte). The position is still open with TTE > 0.
+    runner._stop_event = asyncio.Event()  # _apply_candidates → _restart_market_subscriber needs this
+    asyncio.run(runner._apply_candidates([]))
+
+    # Position remains open; market is pinned in the active set.
+    assert len(service.portfolio.list_open_positions()) == 1
+    assert candidate.market_id in runner._market_states
+    assert candidate.market_id in runner._candidates
+    closed = service.portfolio.list_closed_positions(limit=5)
+    assert closed == [], "position must NOT be orphan-closed while TTE > 0"
+
+
+def test_apply_candidates_orphan_closes_truly_expired_market(tmp_path: Path) -> None:
+    """When a market past its end_date_iso drops from discovery, the orphan
+    close path must still fire — pinning is a no-op once TTE ≤ 0.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    runner, service, candidate, _approved, _btc = _setup_runner_with_open_yes_position(
+        tmp_path,
+        entry_price=0.50,
+        settings_overrides={},
+    )
+    expired = dataclass_replace(candidate, end_date_iso="2020-01-01T00:00:00Z")
+    runner._candidates[candidate.market_id] = expired
+
+    runner._stop_event = asyncio.Event()
+    asyncio.run(runner._apply_candidates([]))
+
+    assert service.portfolio.list_open_positions() == []
+    closed = service.portfolio.list_closed_positions(limit=5)
+    assert len(closed) == 1
+    assert closed[0].close_reason == "paper_orphan_close"
+
+
+def test_orphan_close_backfills_scoring_fields_from_cached_assessment(tmp_path: Path) -> None:
+    """fair_probability_at_close / edge_at_close must come from the most
+    recent scorer output for that (strategy, market) when emitted via the
+    orphan-close path.
+    """
+    from dataclasses import replace as dataclass_replace
+    from polymarket_ai_agent.types import MarketAssessment, SuggestedSide
+
+    runner, service, candidate, _approved, _btc = _setup_runner_with_open_yes_position(
+        tmp_path,
+        entry_price=0.50,
+        settings_overrides={},
+    )
+    # Seed the per-(strategy, market) cache with a known assessment.
+    cached = MarketAssessment(
+        market_id=candidate.market_id,
+        fair_probability=0.71,
+        confidence=0.80,
+        suggested_side=SuggestedSide.YES,
+        expiry_risk="LOW",
+        reasons_for_trade=[],
+        reasons_to_abstain=[],
+        edge=0.087,
+        raw_model_output="cached",
+        edge_yes=0.087,
+        edge_no=-0.05,
+        fair_probability_no=0.29,
+        slippage_bps=10.0,
+    )
+    runner._last_assessment[("fade", candidate.market_id)] = cached
+    expired = dataclass_replace(candidate, end_date_iso="2020-01-01T00:00:00Z")
+    runner._candidates[candidate.market_id] = expired
+
+    # Snapshot the journal length before so we can isolate the new event.
+    before = list(service.journal.read_recent_events(limit=200))
+
+    runner._stop_event = asyncio.Event()
+    asyncio.run(runner._apply_candidates([]))
+
+    after = list(service.journal.read_recent_events(limit=200))
+    new_events = [e for e in after if e not in before]
+    orphan_events = [e for e in new_events if e.get("event_type") == "position_closed"]
+    assert orphan_events, "expected a position_closed event from the orphan path"
+    payload = orphan_events[-1]["payload"]
+    assert payload["close_reason"] == "paper_orphan_close"
+    assert payload["fair_probability_at_close"] == 0.71
+    assert payload["edge_at_close"] == 0.087
+    # Cache entry is consumed on close so a future re-entry doesn't reuse it.
+    assert ("fade", candidate.market_id) not in runner._last_assessment
+
+
 def test_daemon_skips_decision_when_prior_tick_still_running(tmp_path: Path) -> None:
     """Re-entrant guard: a second decision attempt arriving while the first
     is still awaiting the callback must be dropped (and counted), not queued.

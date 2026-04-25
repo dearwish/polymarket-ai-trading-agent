@@ -287,6 +287,12 @@ class DaemonRunner:
         # can see the pressure. Lazily allocated on first use to avoid binding
         # to a loop in ``__init__`` (constructed off-loop in some tests).
         self._decision_lock: asyncio.Lock | None = None
+        # Per-(strategy_id, market_id) snapshot of the most recent scorer
+        # output. Used to backfill ``fair_probability_at_close`` and
+        # ``edge_at_close`` on orphan-closes, which previously emitted nulls
+        # because the close path doesn't re-score. Bounded implicitly by the
+        # active set + open-position count; pruned alongside ``_position_extras``.
+        self._last_assessment: dict[tuple[str, str], MarketAssessment] = {}
         # Per-open-position state used by trailing stop / tranche ladder logic.
         # Paper-mode only: lives in memory, reset if the daemon restarts.
         # Per-(strategy_id, market_id) extras. Keyed on a tuple so multiple
@@ -407,23 +413,59 @@ class DaemonRunner:
             if candidate.no_token_id:
                 asset_to_market[candidate.no_token_id] = candidate.market_id
                 asset_ids.add(candidate.no_token_id)
-        # Close paper positions whose market is not in the new active set.
-        # Checks ALL open positions (not just "dropped" ones) so orphans from a
-        # previous daemon session are caught on the first discovery cycle after restart.
+        # Reconcile open paper positions against the new active set.
+        # Two cases for a market that's open but absent from discovery:
+        #
+        #   (a) market has truly expired (TTE ≤ 0) — orphan-close it; the
+        #       position lifecycle can never run on a market past resolution.
+        #   (b) market just dropped below ``family_min_tte`` (e.g. 60 s for
+        #       btc_15m) — *pin* it back into the active set so the WS
+        #       subscription stays live and the exit ladder
+        #       (TP / trail / SL / force-exit / TTE buffer) controls the close.
+        #
+        # Previously every drop fell through to (a), which short-circuited
+        # the exit ladder at exactly the moment positions were most likely
+        # to resolve. Pinning lets the ladder do its job; orphan-close is now
+        # a true safety net for resolved markets only.
         # Only runs in paper mode — live positions are managed by the live executor.
         if self.settings.daemon_auto_paper_execute:
             all_open = await asyncio.to_thread(self.service.portfolio.list_open_positions)
             for open_pos in all_open:
                 mid = open_pos.market_id
-                if mid not in new_candidates:
-                    cand = self._candidates.get(mid)
-                    if cand is None:
-                        try:
-                            cand = await asyncio.to_thread(self.service.polymarket.get_market, mid)
-                        except Exception as exc:
-                            logger.warning("Orphan close: could not fetch candidate for %s: %s", mid, exc)
-                    if cand is not None:
-                        await self._close_orphaned_position(mid, open_pos, cand)
+                if mid in new_candidates:
+                    continue
+                cand = self._candidates.get(mid)
+                if cand is None:
+                    try:
+                        cand = await asyncio.to_thread(self.service.polymarket.get_market, mid)
+                    except Exception as exc:
+                        logger.warning("Orphan close: could not fetch candidate for %s: %s", mid, exc)
+                if cand is None:
+                    continue
+                tte = self._seconds_to_expiry(cand.end_date_iso)
+                if tte <= 0:
+                    await self._close_orphaned_position(mid, open_pos, cand)
+                    continue
+                # Pin: re-add to the active set, reusing any existing in-memory
+                # MarketState so the rolling features survive the discovery cycle.
+                pinned_state = self._market_states.get(mid) or MarketState(
+                    market_id=mid,
+                    yes_token_id=cand.yes_token_id,
+                    no_token_id=cand.no_token_id,
+                )
+                new_states[mid] = pinned_state
+                new_candidates[mid] = cand
+                if cand.yes_token_id:
+                    asset_to_market[cand.yes_token_id] = mid
+                    asset_ids.add(cand.yes_token_id)
+                if cand.no_token_id:
+                    asset_to_market[cand.no_token_id] = mid
+                    asset_ids.add(cand.no_token_id)
+                logger.info(
+                    "Pinned market %s (open position, TTE=%ds) — exit ladder owns the close.",
+                    mid,
+                    tte,
+                )
         self._market_states = new_states
         self._candidates = new_candidates
         self._asset_to_market = asset_to_market
@@ -763,6 +805,10 @@ class DaemonRunner:
             # packet; production always supplies one.
             return
         per_ctx = replace(context, assessment=assessment)
+        # Cache the latest assessment per (strategy, market) so an orphan
+        # close can surface fair_probability_at_close / edge_at_close
+        # instead of emitting nulls.
+        self._last_assessment[(strategy.strategy_id, context.market_id)] = assessment
         await self._default_decision_callback(per_ctx, strategy.strategy_id)
         await self._paper_execute_for_strategy(per_ctx, strategy.strategy_id)
 
@@ -1129,6 +1175,10 @@ class DaemonRunner:
         extras_key = (strategy_id, market_id)
         self._position_extras.pop(extras_key, None)
         self._last_close_at[extras_key] = _utc_now()
+        # Backfill the close payload from the most recent scorer output for
+        # this (strategy, market). Orphan closes don't re-score, but skipping
+        # these fields blinds analyze_soak's per-trade adverse-selection view.
+        cached_assessment = self._last_assessment.pop(extras_key, None)
 
         entry_price = float(open_pos.entry_price)
         size_usd = float(open_pos.size_usd)
@@ -1155,8 +1205,12 @@ class DaemonRunner:
             "hold_seconds": round(hold_seconds, 3),
             "tte_at_close_seconds": 45,
             "strategy_id": strategy_id,
-            "fair_probability_at_close": None,
-            "edge_at_close": None,
+            "fair_probability_at_close": (
+                cached_assessment.fair_probability if cached_assessment is not None else None
+            ),
+            "edge_at_close": (
+                cached_assessment.edge if cached_assessment is not None else None
+            ),
         }
         await asyncio.to_thread(self.service.journal.log_event, "position_closed", payload)
         logger.info(
