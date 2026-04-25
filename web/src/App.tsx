@@ -884,7 +884,7 @@ function applyDashboardDelta(current: DashboardState, eventName: string, payload
     case "paper_activity":
       return { ...current, paperActivity: (payload as PaperActivityPayload).events };
     case "pending_makers":
-      return { ...current, pendingMakers: (payload as PendingMakersPayload).orders };
+      return { ...current, pendingMakers: (payload as PendingMakersPayload)?.orders ?? [] };
     default:
       return current;
   }
@@ -2358,6 +2358,7 @@ export default function App() {
     daemonHeartbeat: null,
     daemonTicks: [],
     paperActivity: [],
+    pendingMakers: [],
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
