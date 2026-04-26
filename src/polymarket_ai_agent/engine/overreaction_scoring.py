@@ -8,9 +8,16 @@ toward the BTC-implied level on the next few ticks.
 
 Signal construction:
   - ``pm_move = recent_price_change_bps / 10_000``       (30s Polymarket delta)
-  - ``btc_move = btc_log_return_5m``                     (BTC spot delta, same direction)
+  - ``btc_move = btc_log_return_30s``                    (matched 30s BTC spot delta)
   - ``expected_pm_move = btc_move × sensitivity``        (how much PM *should* move)
   - ``overreaction = pm_move − expected_pm_move``        (excess move)
+
+The 30s BTC horizon matches the Polymarket mid-change horizon. The
+earlier 5m BTC horizon was disastrous on free-falling markets: BTC's
+5m return is heavily smoothed and reads ~0% even while spot is
+crashing right now, which made every panic-dump on Polymarket look like
+a "pure overreaction" — see the post-mortem on market 2068470 where
+adaptive_v2 caught a falling knife three times in 8 minutes.
 
 ``sensitivity`` is the conversion from BTC log-return to Polymarket mid
 change. At the money (fair=0.5) a 1 % BTC move commonly shifts mid by
@@ -23,6 +30,7 @@ Decision:
   - ``overreaction > 0``  (mid jumped too far up)  →  bet NO  (expect pullback)
   - ``overreaction < 0``  (mid dropped too far)    →  bet YES (expect bounce)
   - ``edge = |overreaction| − cost_floor``         (transacted profit estimate)
+  - ``edge > max_abs_edge``                        →  ABSTAIN (suspiciously big)
 
 The scorer is stateless; every call is a pure function of the packet.
 All gates (min_edge, min_depth, max_spread, stale_data, TTE buffer,
@@ -55,11 +63,16 @@ class OverreactionScorer:
         sensitivity: float = 10.0,
         cost_floor: float = 0.005,
         min_seconds_to_expiry: int = 60,
+        max_abs_edge: float = 0.30,
     ):
         self.overreaction_threshold = overreaction_threshold
         self.sensitivity = sensitivity
         self.cost_floor = cost_floor
         self.min_seconds_to_expiry = min_seconds_to_expiry
+        # Hard ceiling on |edge|; suspiciously-large overreactions are
+        # historically mis-priced as "noise" when BTC is in fact moving
+        # too fast for the 30s window to keep up. Set to 0.0 to disable.
+        self.max_abs_edge = max_abs_edge
 
     def score_market(self, packet: EvidencePacket) -> MarketAssessment:
         """Return an APPROVED assessment when the packet shows a
@@ -73,10 +86,13 @@ class OverreactionScorer:
             return _with_reason(base, "Overreaction: pre-market — thesis requires a live candle.")
 
         # We need the mid-history populated (at least one earlier sample)
-        # and a BTC 5m return. Both read zero at cold start; without them
-        # we'd manufacture a bogus overreaction signal from nothing.
+        # and a matched-horizon BTC return. Both read zero at cold start;
+        # without them we'd manufacture a bogus overreaction signal from
+        # nothing. Falls back to btc_log_return_5m only when the 30s
+        # field is structurally absent (legacy non-stream packets) — but
+        # the daemon's research builder always supplies the 30s value.
         pm_move = float(packet.recent_price_change_bps) / 10_000.0
-        btc_move = float(packet.btc_log_return_5m or 0.0)
+        btc_move = float(packet.btc_log_return_30s or packet.btc_log_return_5m or 0.0)
         if pm_move == 0.0 and btc_move == 0.0:
             return _with_reason(base, "Overreaction: no mid / BTC delta yet.")
 
@@ -116,6 +132,15 @@ class OverreactionScorer:
                 (
                     f"Overreaction: |excess|={abs(overreaction):.4f} ≤ cost_floor "
                     f"{self.cost_floor:.4f}; would not recover fees."
+                ),
+            )
+        if self.max_abs_edge > 0.0 and edge > self.max_abs_edge:
+            return _with_reason(
+                base,
+                (
+                    f"Overreaction: |edge|={edge:.4f} > ceiling "
+                    f"{self.max_abs_edge:.4f} — suspiciously large excess "
+                    f"(typically a real BTC move outpacing the 30s window)."
                 ),
             )
 

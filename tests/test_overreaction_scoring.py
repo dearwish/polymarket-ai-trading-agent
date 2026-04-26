@@ -176,3 +176,73 @@ def test_raw_model_output_always_tagged() -> None:
     abstained = scorer.score_market(_packet())
     assert approved.raw_model_output == OVERREACTION_TAG
     assert abstained.raw_model_output == OVERREACTION_TAG
+
+
+def test_btc_30s_takes_precedence_over_5m_when_both_present() -> None:
+    """The scorer's BTC reference is the 30s window — matched to the
+    Polymarket mid-change horizon. When both 30s and 5m are present, 30s
+    wins. Reproduces the structural fix for the 2026-04-25 mkt 2068470
+    falling-knife scenario where a 5m window read ~0% while spot was
+    crashing right then.
+    """
+    # Construct: PM mid dumped -20% over 30s. The 5m BTC return looks
+    # benign (-0.03%) but the 30s BTC return is -0.10% (real crash). At
+    # sensitivity=10 the 30s window justifies a -1% mid move; PM
+    # actually moved -20% → excess -19%. Capped by max_abs_edge below.
+    scorer = OverreactionScorer(
+        overreaction_threshold=0.02,
+        sensitivity=10.0,
+        cost_floor=0.005,
+        max_abs_edge=0.0,  # disable ceiling so we can isolate the BTC-window choice
+    )
+    packet = _packet(
+        recent_price_change_bps=-2000.0,
+        btc_log_return_30s=-0.001,
+        btc_log_return_5m=-0.0003,
+    )
+    result = scorer.score_market(packet)
+    # With 30s as the reference: expected_pm_move = -0.001 * 10 = -0.01,
+    #   excess = -0.20 − (-0.01) = -0.19; |excess|=0.19 → edge ≈ 0.185
+    # With 5m as the reference (broken): expected = -0.003,
+    #   excess = -0.20 − (-0.003) = -0.197; |excess|≈0.197 → edge ≈ 0.192
+    # Either way the side is YES; the precedence is asserted via the edge
+    # value, which only matches the 30s computation.
+    assert result.suggested_side == SuggestedSide.YES
+    assert abs(result.edge - 0.185) < 1e-3, f"expected ~0.185 (30s), got {result.edge:.4f}"
+
+
+def test_max_abs_edge_ceiling_abstains_on_suspiciously_large_excess() -> None:
+    """Reproduce the mkt 2068470 trade #3 entry: PM was crashing in
+    free-fall while BTC's 30s window hadn't fully captured the move yet.
+    The scorer would compute a +20% edge — the empirically worst-PnL
+    bucket. The ceiling forces ABSTAIN.
+    """
+    scorer = OverreactionScorer(
+        overreaction_threshold=0.02,
+        sensitivity=10.0,
+        cost_floor=0.005,
+        max_abs_edge=0.30,
+    )
+    packet = _packet(
+        recent_price_change_bps=-3500.0,  # PM dumped -35%
+        btc_log_return_30s=-0.0005,        # BTC barely moved on the 30s window
+    )
+    result = scorer.score_market(packet)
+    assert result.suggested_side == SuggestedSide.ABSTAIN
+    assert any("ceiling" in r for r in result.reasons_to_abstain)
+
+
+def test_max_abs_edge_zero_disables_ceiling() -> None:
+    """Operators can opt out of the ceiling entirely with max_abs_edge=0.0."""
+    scorer = OverreactionScorer(
+        overreaction_threshold=0.02,
+        sensitivity=10.0,
+        cost_floor=0.005,
+        max_abs_edge=0.0,
+    )
+    packet = _packet(recent_price_change_bps=-3500.0, btc_log_return_30s=-0.0005)
+    result = scorer.score_market(packet)
+    # Without the ceiling the trade goes through despite the suspiciously
+    # large excess.
+    assert result.suggested_side == SuggestedSide.YES
+    assert result.edge > 0.30

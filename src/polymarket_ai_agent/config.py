@@ -139,6 +139,12 @@ class Settings(BaseSettings):
     # 1-lot levels when computing best-bid/best-ask — prevents the paper
     # maker from posting behind a phantom order. 0.0 disables (raw mid).
     paper_follow_min_level_size_shares: float = 0.0
+    # Route the fade scorer's BUY assessments through the paper-maker
+    # lifecycle (resting limit at mid − ``paper_follow_limit_discount_bps``,
+    # TTL ``paper_follow_maker_ttl_seconds``) instead of the immediate
+    # taker fill. Lets us simulate a post-only-GTC live-trading mode on
+    # paper before flipping the live flag. Off by default; live-reloadable.
+    fade_post_only: bool = False
     # Penny-buy strategy (extreme-tail dip). Runs as a third strategy
     # alongside fade + adaptive. See ``engine/penny_scoring.py`` for the
     # thesis and ``scripts/backtest_penny.py`` for the parameter sweep
@@ -178,11 +184,25 @@ class Settings(BaseSettings):
     adaptive_v2_sensitivity: float = 10.0
     adaptive_v2_cost_floor: float = 0.005
     adaptive_v2_min_seconds_to_expiry: int = 60
+    # Hard ceiling on |edge| for the overreaction-fade scorer. Mirrors
+    # ``quant_max_abs_edge`` for adaptive_v2: empirically the highest-edge
+    # ticks have been the worst-PnL bucket because they correspond to
+    # *real* (not noise) Polymarket moves the BTC reference hasn't caught
+    # up to yet. 0.0 disables.
+    adaptive_v2_max_abs_edge: float = 0.30
 
     fee_bps: float = 0.0
     execution_maker_min_edge: float = 0.04
     execution_maker_min_tte_seconds: int = 120
     execution_price_tick: float = 0.01
+    # Hysteresis on maker cancel/replace: only re-quote when the fresh maker
+    # price has moved by more than ``execution_replace_min_ticks`` × tick OR
+    # when the resting size differs from a target size by more than
+    # ``execution_replace_min_size_pct``. Default of 2 ticks (warproxxx /
+    # gamma-trade-lab pattern) prevents the cancel-thrash that kills queue
+    # position when our scorer re-fires on every WS event with sub-tick noise.
+    execution_replace_min_ticks: float = 2.0
+    execution_replace_min_size_pct: float = 0.10
     execution_exit_buffer_floor_seconds: int = 10
     execution_exit_buffer_pct_of_tte: float = 0.1
     quant_drift_damping: float = 0.5
@@ -381,6 +401,11 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "step": 1,
         "group": "paper",
     },
+    "fade_post_only": {
+        "label": "Fade Post-Only (route through paper-maker)",
+        "type": "boolean",
+        "group": "paper",
+    },
     "adaptive_enabled": {
         "label": "Adaptive (V1, fade-clone) Enabled",
         "type": "boolean",
@@ -483,6 +508,14 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "max": 900,
         "step": 10,
         "group": "paper",
+    },
+    "adaptive_v2_max_abs_edge": {
+        "label": "Adaptive V2 Max |Edge| Ceiling",
+        "type": "number",
+        "min": 0,
+        "max": 1,
+        "step": 0.01,
+        "group": "thresholds",
     },
     "paper_take_profit_pct": {
         "label": "Paper Take Profit %",

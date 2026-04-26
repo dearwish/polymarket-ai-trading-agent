@@ -39,6 +39,13 @@ class BtcSnapshot:
     realized_vol_30m: float
     sample_count: int
     btc_session: str = "off"
+    # Short-horizon BTC delta. Used by overreaction-fade to detect
+    # "BTC is moving NOW" — the 5m window is too smoothed to catch a
+    # market in free-fall, which is exactly when adaptive_v2's claimed
+    # overreaction is in fact a real move (mkt 2068470, 2026-04-25).
+    # Defaults to 0.0 so existing test fixtures that build BtcSnapshot
+    # positionally don't break.
+    log_return_30s: float = 0.0
     # HTF log returns derived from the 1-minute bar buffer (backfilled from
     # Binance /klines on startup, then rolled forward as ticks cross minute
     # boundaries). Emit 0.0 until enough bars have accumulated for the horizon.
@@ -254,6 +261,7 @@ class BtcState:
             price=last_price,
             observed_at=observed_at,
             log_return_10s=self.log_return_over(10.0, now=current_ts),
+            log_return_30s=self.log_return_over(30.0, now=current_ts),
             log_return_1m=self.log_return_over(60.0, now=current_ts),
             log_return_5m=self.log_return_over(300.0, now=current_ts),
             log_return_15m=self.log_return_over(900.0, now=current_ts),

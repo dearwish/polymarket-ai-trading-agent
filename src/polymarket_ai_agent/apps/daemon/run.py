@@ -33,7 +33,7 @@ from polymarket_ai_agent.engine.maker_rewards import estimate_reward_per_100
 from polymarket_ai_agent.engine.overreaction_scoring import OverreactionScorer
 from polymarket_ai_agent.engine.penny_scoring import PENNY_STRATEGY_TAG, PennyScorer
 from polymarket_ai_agent.engine.market_state import MarketFeatures, MarketState
-from polymarket_ai_agent.engine.quant_scoring import QuantScoringEngine
+from polymarket_ai_agent.engine.quant_scoring import FADE_POST_ONLY_TAG, QuantScoringEngine
 from polymarket_ai_agent.engine.regime import Regime, classify_regime
 from polymarket_ai_agent.engine.research import ResearchEngine
 from polymarket_ai_agent.service import AgentService
@@ -77,6 +77,51 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _serialize_pending_makers(
+    pending: dict[tuple[str, str], "PaperMakerOrder"],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Render ``_pending_makers`` for the dashboard heartbeat.
+
+    Resting limits aren't persisted to SQLite (they live only in daemon
+    memory until they fill, expire, or get cancelled), so the heartbeat
+    is the only operator-facing surface for them. Each row carries the
+    placement details the operator needs to judge "why hasn't this
+    filled?": limit_price, age, ttl_remaining_seconds.
+    """
+    rows: list[dict[str, Any]] = []
+    for (strategy_id, market_id), order in pending.items():
+        age_seconds = (now - order.placed_at).total_seconds()
+        rows.append({
+            "strategy_id": strategy_id,
+            "market_id": market_id,
+            "side": order.side.value,
+            "limit_price": order.limit_price,
+            "size_usd": order.size_usd,
+            "placed_at": order.placed_at.isoformat(),
+            "ttl_seconds": order.ttl_seconds,
+            "age_seconds": round(age_seconds, 2),
+            "ttl_remaining_seconds": round(
+                max(0.0, order.ttl_seconds - age_seconds), 2
+            ),
+        })
+    return rows
+
+
+def _nest_position_extras(
+    extras_by_pair: dict[tuple[str, str], dict[str, float]],
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Group ``self._position_extras`` (keyed on ``(strategy_id, market_id)``)
+    into the nested ``{strategy_id: {market_id: extras}}`` shape that the
+    dashboard expects, so every strategy's trail state survives the heartbeat
+    serialisation (not just ``fade``).
+    """
+    nested: dict[str, dict[str, dict[str, float]]] = {}
+    for (strategy_id, market_id), extras in extras_by_pair.items():
+        nested.setdefault(strategy_id, {})[market_id] = dict(extras)
+    return nested
+
+
 @dataclass(slots=True)
 class DaemonMetrics:
     started_at: datetime = field(default_factory=_utc_now)
@@ -88,6 +133,16 @@ class DaemonMetrics:
     btc_ticks: int = 0
     btc_reconnects: int = 0
     decision_ticks: int = 0
+    # Number of would-be decision ticks dropped because the prior tick was
+    # still running (re-entrant guard). A non-zero counter under load is the
+    # signal that ``decision_min_interval_seconds`` is shorter than callback
+    # latency — operators tune from there.
+    decision_skips_busy: int = 0
+    # Trigger-reason histogram for decision ticks that actually fired. Lets
+    # the operator stratify "why did we score then?" — book updates vs. price
+    # changes vs. trade prints — without joining the journal. Keys are the
+    # raw Polymarket WS event types plus "btc_tick" for BTC-driven re-scoring.
+    decision_triggers: dict[str, int] = field(default_factory=dict)
     last_polymarket_event_at: datetime | None = None
     last_btc_tick_at: datetime | None = None
     last_decision_at: datetime | None = None
@@ -143,6 +198,11 @@ class DecisionContext:
     metrics: "DaemonMetrics"
     packet: "EvidencePacket | None" = None
     shadow_assessment: "MarketAssessment | None" = None
+    # Why this decision tick fired — Polymarket WS event types ("book",
+    # "price_change", "last_trade_price") or "btc_tick" / "manual". Surfaced
+    # on the ``daemon_tick`` journal event so post-hoc analysis can stratify
+    # adverse-selection by trigger.
+    trigger_reason: str = "unknown"
 
 
 # Minimal protocol satisfied by both QuantScoringEngine and AdaptiveScorer —
@@ -245,6 +305,7 @@ class DaemonRunner:
             sensitivity=float(settings.adaptive_v2_sensitivity),
             cost_floor=float(settings.adaptive_v2_cost_floor),
             min_seconds_to_expiry=int(settings.adaptive_v2_min_seconds_to_expiry),
+            max_abs_edge=float(settings.adaptive_v2_max_abs_edge),
         )
         self._strategies: list[StrategyConfig] = [
             StrategyConfig(strategy_id=_DEFAULT_STRATEGY_ID, scorer=self.quant),
@@ -263,6 +324,21 @@ class DaemonRunner:
         self._market_subscriber_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
         self._last_decision_at: datetime | None = None
+        # Re-entrant guard: bursty WS events can fire ``_maybe_fire_decision``
+        # faster than a paper-pipeline tick can complete (multi-strategy +
+        # SQLite writes can exceed ``decision_min_interval_seconds`` under
+        # load). Mirroring the official ``Lifecycle.AsyncCallback.trigger``
+        # pattern, we *skip* — not queue — any tick attempted while the prior
+        # one is still running, and bump ``decision_skips_busy`` so operators
+        # can see the pressure. Lazily allocated on first use to avoid binding
+        # to a loop in ``__init__`` (constructed off-loop in some tests).
+        self._decision_lock: asyncio.Lock | None = None
+        # Per-(strategy_id, market_id) snapshot of the most recent scorer
+        # output. Used to backfill ``fair_probability_at_close`` and
+        # ``edge_at_close`` on orphan-closes, which previously emitted nulls
+        # because the close path doesn't re-score. Bounded implicitly by the
+        # active set + open-position count; pruned alongside ``_position_extras``.
+        self._last_assessment: dict[tuple[str, str], MarketAssessment] = {}
         # Per-open-position state used by trailing stop / tranche ladder logic.
         # Paper-mode only: lives in memory, reset if the daemon restarts.
         # Per-(strategy_id, market_id) extras. Keyed on a tuple so multiple
@@ -383,23 +459,59 @@ class DaemonRunner:
             if candidate.no_token_id:
                 asset_to_market[candidate.no_token_id] = candidate.market_id
                 asset_ids.add(candidate.no_token_id)
-        # Close paper positions whose market is not in the new active set.
-        # Checks ALL open positions (not just "dropped" ones) so orphans from a
-        # previous daemon session are caught on the first discovery cycle after restart.
+        # Reconcile open paper positions against the new active set.
+        # Two cases for a market that's open but absent from discovery:
+        #
+        #   (a) market has truly expired (TTE ≤ 0) — orphan-close it; the
+        #       position lifecycle can never run on a market past resolution.
+        #   (b) market just dropped below ``family_min_tte`` (e.g. 60 s for
+        #       btc_15m) — *pin* it back into the active set so the WS
+        #       subscription stays live and the exit ladder
+        #       (TP / trail / SL / force-exit / TTE buffer) controls the close.
+        #
+        # Previously every drop fell through to (a), which short-circuited
+        # the exit ladder at exactly the moment positions were most likely
+        # to resolve. Pinning lets the ladder do its job; orphan-close is now
+        # a true safety net for resolved markets only.
         # Only runs in paper mode — live positions are managed by the live executor.
         if self.settings.daemon_auto_paper_execute:
             all_open = await asyncio.to_thread(self.service.portfolio.list_open_positions)
             for open_pos in all_open:
                 mid = open_pos.market_id
-                if mid not in new_candidates:
-                    cand = self._candidates.get(mid)
-                    if cand is None:
-                        try:
-                            cand = await asyncio.to_thread(self.service.polymarket.get_market, mid)
-                        except Exception as exc:
-                            logger.warning("Orphan close: could not fetch candidate for %s: %s", mid, exc)
-                    if cand is not None:
-                        await self._close_orphaned_position(mid, open_pos, cand)
+                if mid in new_candidates:
+                    continue
+                cand = self._candidates.get(mid)
+                if cand is None:
+                    try:
+                        cand = await asyncio.to_thread(self.service.polymarket.get_market, mid)
+                    except Exception as exc:
+                        logger.warning("Orphan close: could not fetch candidate for %s: %s", mid, exc)
+                if cand is None:
+                    continue
+                tte = self._seconds_to_expiry(cand.end_date_iso)
+                if tte <= 0:
+                    await self._close_orphaned_position(mid, open_pos, cand)
+                    continue
+                # Pin: re-add to the active set, reusing any existing in-memory
+                # MarketState so the rolling features survive the discovery cycle.
+                pinned_state = self._market_states.get(mid) or MarketState(
+                    market_id=mid,
+                    yes_token_id=cand.yes_token_id,
+                    no_token_id=cand.no_token_id,
+                )
+                new_states[mid] = pinned_state
+                new_candidates[mid] = cand
+                if cand.yes_token_id:
+                    asset_to_market[cand.yes_token_id] = mid
+                    asset_ids.add(cand.yes_token_id)
+                if cand.no_token_id:
+                    asset_to_market[cand.no_token_id] = mid
+                    asset_ids.add(cand.no_token_id)
+                logger.info(
+                    "Pinned market %s (open position, TTE=%ds) — exit ladder owns the close.",
+                    mid,
+                    tte,
+                )
         self._market_states = new_states
         self._candidates = new_candidates
         self._asset_to_market = asset_to_market
@@ -451,7 +563,7 @@ class DaemonRunner:
             state.apply_price_change(payload)
         elif event.event_type in {"last_trade_price", "trade"}:
             state.apply_last_trade(payload)
-        await self._maybe_fire_decision(state)
+        await self._maybe_fire_decision(state, trigger_reason=event.event_type)
 
     # --- BTC WS --------------------------------------------------------
 
@@ -485,7 +597,9 @@ class DaemonRunner:
 
     # --- Decision gating ----------------------------------------------
 
-    async def _maybe_fire_decision(self, state: MarketState) -> None:
+    async def _maybe_fire_decision(
+        self, state: MarketState, trigger_reason: str = "unknown"
+    ) -> None:
         now = _utc_now()
         if self._last_decision_at is not None:
             elapsed = (now - self._last_decision_at).total_seconds()
@@ -500,9 +614,30 @@ class DaemonRunner:
         candidate = self._candidates.get(state.market_id)
         if candidate is None:
             return
+        # Re-entrant guard. If the prior tick is still running, drop this one
+        # rather than queueing — a queued tick would just process against
+        # state that's about to be superseded by the next event anyway.
+        if self._decision_lock is None:
+            self._decision_lock = asyncio.Lock()
+        if self._decision_lock.locked():
+            self.metrics.decision_skips_busy += 1
+            return
+        async with self._decision_lock:
+            await self._run_decision(state, candidate, now, trigger_reason)
+
+    async def _run_decision(
+        self,
+        state: MarketState,
+        candidate: MarketCandidate,
+        now: datetime,
+        trigger_reason: str,
+    ) -> None:
         self._last_decision_at = now
         self.metrics.decision_ticks += 1
         self.metrics.last_decision_at = now
+        self.metrics.decision_triggers[trigger_reason] = (
+            self.metrics.decision_triggers.get(trigger_reason, 0) + 1
+        )
         started = _utc_now()
         features = state.features(now=now)
         btc_snapshot = self.btc_state.snapshot(now=now)
@@ -539,6 +674,7 @@ class DaemonRunner:
             metrics=self.metrics,
             packet=packet,
             shadow_assessment=shadow_assessment,
+            trigger_reason=trigger_reason,
         )
         try:
             await self._decision_callback(context)
@@ -607,6 +743,7 @@ class DaemonRunner:
         )
         payload: dict[str, Any] = {
             "strategy_id": strategy_id,
+            "trigger_reason": context.trigger_reason,
             "market_id": features.market_id,
             "question": context.candidate.question,
             "slug": context.candidate.slug,
@@ -627,6 +764,7 @@ class DaemonRunner:
             "last_update_age_seconds": features.last_update_age_seconds,
             "btc_price": btc.price if btc else None,
             "btc_realized_vol_30m": btc.realized_vol_30m if btc else None,
+            "btc_log_return_30s": btc.log_return_30s if btc else None,
             "btc_log_return_5m": btc.log_return_5m if btc else None,
             "btc_log_return_since_candle_open": context.packet.btc_log_return_since_candle_open if context.packet else None,
             "time_elapsed_in_candle_s": context.packet.time_elapsed_in_candle_s if context.packet else None,
@@ -714,6 +852,10 @@ class DaemonRunner:
             # packet; production always supplies one.
             return
         per_ctx = replace(context, assessment=assessment)
+        # Cache the latest assessment per (strategy, market) so an orphan
+        # close can surface fair_probability_at_close / edge_at_close
+        # instead of emitting nulls.
+        self._last_assessment[(strategy.strategy_id, context.market_id)] = assessment
         await self._default_decision_callback(per_ctx, strategy.strategy_id)
         await self._paper_execute_for_strategy(per_ctx, strategy.strategy_id)
 
@@ -913,7 +1055,10 @@ class DaemonRunner:
         # via raw_model_output. Route to the paper-maker lifecycle and
         # return — the normal risk → execute → taker path doesn't apply
         # because the follow assessment's ``edge`` is zeroed by design.
-        if assessment.raw_model_output == ADAPTIVE_FOLLOW_MAKER_TAG:
+        if assessment.raw_model_output in (
+            ADAPTIVE_FOLLOW_MAKER_TAG,
+            FADE_POST_ONLY_TAG,
+        ):
             await self._handle_follow_maker(context, strategy_id)
             return
 
@@ -1080,6 +1225,10 @@ class DaemonRunner:
         extras_key = (strategy_id, market_id)
         self._position_extras.pop(extras_key, None)
         self._last_close_at[extras_key] = _utc_now()
+        # Backfill the close payload from the most recent scorer output for
+        # this (strategy, market). Orphan closes don't re-score, but skipping
+        # these fields blinds analyze_soak's per-trade adverse-selection view.
+        cached_assessment = self._last_assessment.pop(extras_key, None)
 
         entry_price = float(open_pos.entry_price)
         size_usd = float(open_pos.size_usd)
@@ -1106,8 +1255,12 @@ class DaemonRunner:
             "hold_seconds": round(hold_seconds, 3),
             "tte_at_close_seconds": 45,
             "strategy_id": strategy_id,
-            "fair_probability_at_close": None,
-            "edge_at_close": None,
+            "fair_probability_at_close": (
+                cached_assessment.fair_probability if cached_assessment is not None else None
+            ),
+            "edge_at_close": (
+                cached_assessment.edge if cached_assessment is not None else None
+            ),
         }
         await asyncio.to_thread(self.service.journal.log_event, "position_closed", payload)
         logger.info(
@@ -1637,18 +1790,29 @@ class DaemonRunner:
                     "safety_stop_reason": self.metrics.safety_stop_reason,
                     "market_family": self.settings.market_family,
                     # Per-open-position trail state. Lets the dashboard render the
-                    # live trailing-stop level alongside the Mark column.
-                    # Phase 1 emits only the default-strategy slice (flat shape)
-                    # so the web UI's ``positionExtras[market_id]`` indexing
-                    # keeps working. Phase 2 will switch to a nested shape when
-                    # multiple strategies run concurrently.
-                    "position_extras": {
+                    # Live trailing-stop / TP-ladder state per (strategy, market).
+                    # Nested shape so the dashboard can look up extras by both
+                    # dimensions (a position on adaptive_v2 doesn't share state
+                    # with a position on fade for the same market). Schema:
+                    #   { strategy_id: { market_id: { peak_price, ... } } }
+                    "position_extras": _nest_position_extras(self._position_extras),
+                    # Flat shape kept for backwards compatibility with any
+                    # consumer still indexing by market_id only — collapses all
+                    # strategies onto market_id; if multiple strategies hold the
+                    # same market, last-write wins. Will be removed once all
+                    # consumers read the nested form.
+                    "position_extras_flat": {
                         market_id: dict(extras)
-                        for (strategy_id, market_id), extras in self._position_extras.items()
-                        if strategy_id == _DEFAULT_STRATEGY_ID
+                        for (_strategy_id, market_id), extras in self._position_extras.items()
                     },
                     "paper_trailing_stop_pct": float(self.settings.paper_trailing_stop_pct),
                     "paper_trail_arm_pct": float(self.settings.paper_trail_arm_pct),
+                    # Resting paper-maker limits. Lives only in daemon
+                    # memory; the heartbeat is the dashboard's sole window
+                    # into "what limits are riding the book right now".
+                    "pending_makers": _serialize_pending_makers(
+                        self._pending_makers, _utc_now()
+                    ),
                 }
                 await asyncio.to_thread(self.heartbeat.write, self.metrics, extra)
             except Exception as exc:
@@ -1794,6 +1958,7 @@ class DaemonRunner:
             sensitivity=float(new_settings.adaptive_v2_sensitivity),
             cost_floor=float(new_settings.adaptive_v2_cost_floor),
             min_seconds_to_expiry=int(new_settings.adaptive_v2_min_seconds_to_expiry),
+            max_abs_edge=float(new_settings.adaptive_v2_max_abs_edge),
         )
         # Toggle optional strategies in/out of the list in place, preserving
         # fade at index 0 so the order stays stable.
