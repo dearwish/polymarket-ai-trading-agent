@@ -2607,68 +2607,99 @@ function EventSmartMoneyPage() {
     <section className="page-section">
       <article className="card">
         <header className="card-header">
-          <h2>Event Smart-Money Signals</h2>
-          <p className="muted">
-            Daily-snapshotted conviction ranking of multi-outcome Polymarket events.
-            Top-1 by conviction has hit the actual winner in 26/27 resolved historical events
-            in the validation backtest (+154.9% ROI on the top-1 basket). Forward-test
-            cron writes one snapshot per event per day to
-            <code> scripts/_event_smart_money_snapshots.jsonl</code>.
-          </p>
+          <div>
+            <h2 style={{ margin: 0 }}>Event Smart-Money Signals</h2>
+            <p className="muted" style={{ marginTop: "0.25em", marginBottom: 0, fontSize: "0.9em" }}>
+              Conviction-ranked outcomes across multi-outcome Polymarket events.
+              Top-1 hit the actual winner in <strong>26/27</strong> resolved historical events (<strong>+154.9% ROI</strong> validation).
+              Daily cron at 07:00 IDT appends to <code>scripts/_event_smart_money_snapshots.jsonl</code>.
+            </p>
+          </div>
         </header>
-        <div className="form-row">
-          <label className="form-label">
-            Min position ($)
-            <input
-              type="number"
-              value={minPositionUsd}
-              min={0}
-              step={100}
-              onChange={(e) => setMinPositionUsd(Number(e.target.value) || 0)}
-            />
-          </label>
-          <label className="form-label">
-            Min avg price
-            <input
-              type="number"
-              value={minAvgPrice}
-              min={0}
-              max={1}
-              step={0.001}
-              onChange={(e) => setMinAvgPrice(Number(e.target.value) || 0)}
-            />
-          </label>
-          <label className="form-label" style={{ flex: 1 }}>
-            Custom slug
-            <input
-              type="text"
-              value={customSlug}
-              placeholder="e.g. eurovision-winner-2026"
-              onChange={(e) => setCustomSlug(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleCustomAnalyze();
-                }
-              }}
-            />
-          </label>
-          <button type="button" className="refresh-button" onClick={handleCustomAnalyze}>
-            Analyze
-          </button>
-          <button type="button" className="refresh-button" onClick={() => void refreshArchive()}>
-            Refresh watchlist
-          </button>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1em", marginTop: "1em" }}>
+          {/* Left column: filter knobs */}
+          <fieldset style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, padding: "0.75em 1em" }}>
+            <legend style={{ padding: "0 0.5em", fontSize: "0.85em" }} className="muted">
+              Conviction filters
+            </legend>
+            <div style={{ display: "flex", gap: "1em", alignItems: "flex-end", flexWrap: "wrap" }}>
+              <label className="form-label" style={{ flex: "1 1 140px" }}>
+                Min position ($)
+                <input
+                  type="number"
+                  value={minPositionUsd}
+                  min={0}
+                  step={100}
+                  onChange={(e) => setMinPositionUsd(Number(e.target.value) || 0)}
+                />
+              </label>
+              <label className="form-label" style={{ flex: "1 1 140px" }}>
+                Min avg price (¢ filter)
+                <input
+                  type="number"
+                  value={minAvgPrice}
+                  min={0}
+                  max={1}
+                  step={0.001}
+                  onChange={(e) => setMinAvgPrice(Number(e.target.value) || 0)}
+                />
+              </label>
+            </div>
+            <div className="muted" style={{ fontSize: "0.8em", marginTop: "0.5em" }}>
+              Applies to the detail panel below and custom-slug analyses. Higher values drop noise.
+            </div>
+          </fieldset>
+
+          {/* Right column: analyze any event */}
+          <fieldset style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, padding: "0.75em 1em" }}>
+            <legend style={{ padding: "0 0.5em", fontSize: "0.85em" }} className="muted">
+              Analyze any event
+            </legend>
+            <div style={{ display: "flex", gap: "0.5em", alignItems: "flex-end" }}>
+              <label className="form-label" style={{ flex: 1 }}>
+                Polymarket event slug
+                <input
+                  type="text"
+                  value={customSlug}
+                  placeholder="e.g. eurovision-winner-2026"
+                  onChange={(e) => setCustomSlug(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      handleCustomAnalyze();
+                    }
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className="refresh-button"
+                onClick={handleCustomAnalyze}
+                disabled={!customSlug.trim()}
+              >
+                Analyze
+              </button>
+            </div>
+            <div className="muted" style={{ fontSize: "0.8em", marginTop: "0.5em" }}>
+              Hits the live API (5–30s). Cached server-side for 5 min per (slug, filter).
+            </div>
+          </fieldset>
         </div>
       </article>
 
       <article className="card">
-        <header className="card-header">
-          <h2>Watchlist · {snapshots.length} events</h2>
-          {archive && (
-            <span className="muted">
-              {archive.total_records} total snapshot rows in archive
-            </span>
-          )}
+        <header className="card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1em", flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Watchlist · {snapshots.length} events</h2>
+            {archive && (
+              <span className="muted" style={{ fontSize: "0.85em" }}>
+                {archive.total_records} total snapshot rows in archive
+              </span>
+            )}
+          </div>
+          <button type="button" className="refresh-button" onClick={() => void refreshArchive()}>
+            Refresh
+          </button>
         </header>
         <div className="muted" style={{ fontSize: "0.85em", marginBottom: "0.75em", display: "flex", gap: "1em", flexWrap: "wrap" }}>
           <span style={{ borderLeft: "4px solid #2a8a3e", paddingLeft: "0.5em" }}>
