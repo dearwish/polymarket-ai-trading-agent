@@ -2574,6 +2574,48 @@ function EventSmartMoneyPage() {
     }
   };
 
+  // Per-outcome "penny opportunity" tier for the detail panel. Different
+  // thresholds than the top-1 watchlist tiering — for individual outcomes
+  // we care most about: low current price (cheap entry), real smart money
+  // behind it (not zero conviction), and smart money still in profit or
+  // close to it (so we're not catching a falling knife).
+  type OutcomeTier = "green" | "yellow" | "red" | "none";
+  const [pennyOnly, setPennyOnly] = useState<boolean>(false);
+
+  const outcomeTier = (sig: EventSmartMoneyRanked): OutcomeTier => {
+    const cy = sig.current_yes_price;
+    const avg = sig.yes_avg_price;
+    const inv = sig.yes_total_size_usd;
+    const holders = sig.yes_holders_count;
+    // Dead / no signal first.
+    if (cy <= 0.01) return "red";          // outcome is essentially eliminated
+    if (cy >= 0.97) return "red";          // already resolved (no upside left)
+    if (holders < 3 || inv < 5_000) return "none";  // not enough signal to opine
+    // Penny-opportunity GREEN: cheap current entry, real money behind it,
+    // smart money hasn't bled out (current_yes close to or above avg paid).
+    const cheap = cy <= 0.25;
+    const meaningful = inv >= 20_000 && holders >= 5 && avg >= 0.02;
+    const notFalling = cy >= avg * 0.7;   // smart money down ≤30% is acceptable
+    if (cheap && meaningful && notFalling) return "green";
+    // YELLOW: real money present but missing one criterion (a bit pricier,
+    // a bit thinner, or smart money slightly underwater).
+    if (inv >= 10_000 && holders >= 3 && cy <= 0.40) return "yellow";
+    return "none";
+  };
+
+  const outcomeTierStyle = (tier: OutcomeTier): CSSProperties => {
+    switch (tier) {
+      case "green":
+        return { boxShadow: "inset 4px 0 0 0 #2a8a3e", backgroundColor: "rgba(42,138,62,0.06)" };
+      case "yellow":
+        return { boxShadow: "inset 4px 0 0 0 #c69026", backgroundColor: "rgba(198,144,38,0.05)" };
+      case "red":
+        return { boxShadow: "inset 4px 0 0 0 #c0392b", backgroundColor: "rgba(192,57,43,0.04)" };
+      default:
+        return {};
+    }
+  };
+
   const snapshots = useMemo(() => {
     const rows = archive?.snapshots ?? [];
     const dir = sortDir === "asc" ? 1 : -1;
@@ -2844,46 +2886,103 @@ function EventSmartMoneyPage() {
                   Try lowering either threshold.
                 </p>
               )}
-              {detail.ranked_outcomes.length > 0 && (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>Outcome</th>
-                        <th style={{ textAlign: "right" }}>Current YES</th>
-                        <th style={{ textAlign: "right" }}>Holders</th>
-                        <th style={{ textAlign: "right" }}>Avg paid</th>
-                        <th style={{ textAlign: "right" }}>Invested $</th>
-                        <th style={{ textAlign: "right" }}>Total PnL</th>
-                        <th style={{ textAlign: "right" }}>Conviction</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detail.ranked_outcomes.slice(0, 20).map((sig, idx) => (
-                        <tr key={sig.condition_id || sig.outcome}>
-                          <td>{idx + 1}</td>
-                          <td>
-                            <strong>{sig.outcome}</strong>
-                          </td>
-                          <td style={{ textAlign: "right" }}>{sig.current_yes_price.toFixed(4)}</td>
-                          <td style={{ textAlign: "right" }}>{sig.yes_holders_count}</td>
-                          <td style={{ textAlign: "right" }}>{sig.yes_avg_price.toFixed(3)}</td>
-                          <td style={{ textAlign: "right" }}>
-                            ${sig.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                          </td>
-                          <td style={{ textAlign: "right", color: sig.yes_total_pnl >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)" }}>
-                            {sig.yes_total_pnl >= 0 ? "+" : ""}${sig.yes_total_pnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                          </td>
-                          <td style={{ textAlign: "right" }}>
-                            {sig.smart_conviction.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {detail.ranked_outcomes.length > 0 && (() => {
+                const allRows = detail.ranked_outcomes.slice(0, 30);
+                const visibleRows = pennyOnly
+                  ? allRows.filter((sig) => {
+                      const tier = outcomeTier(sig);
+                      return tier === "green" || tier === "yellow";
+                    })
+                  : allRows;
+                const greenCount = allRows.filter((s) => outcomeTier(s) === "green").length;
+                const yellowCount = allRows.filter((s) => outcomeTier(s) === "yellow").length;
+                return (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1em", marginBottom: "0.5em", flexWrap: "wrap" }}>
+                      <div className="muted" style={{ fontSize: "0.85em" }}>
+                        <span style={{ borderLeft: "4px solid #2a8a3e", paddingLeft: "0.5em" }}>
+                          <strong>{greenCount} green</strong> penny opportunities
+                        </span>
+                        <span style={{ marginLeft: "1em", borderLeft: "4px solid #c69026", paddingLeft: "0.5em" }}>
+                          <strong>{yellowCount} yellow</strong> setups
+                        </span>
+                        <span style={{ marginLeft: "1em" }}>
+                          (cheap entry ≤25¢, real smart money, not bleeding)
+                        </span>
+                      </div>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5em", fontSize: "0.9em", userSelect: "none" }}>
+                        <input
+                          type="checkbox"
+                          checked={pennyOnly}
+                          onChange={(e) => setPennyOnly(e.target.checked)}
+                        />
+                        Penny opportunities only
+                      </label>
+                    </div>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>#</th>
+                            <th>Outcome</th>
+                            <th style={{ textAlign: "right" }}>Current YES</th>
+                            <th style={{ textAlign: "right" }}>Holders</th>
+                            <th style={{ textAlign: "right" }}>Avg paid</th>
+                            <th style={{ textAlign: "right" }}>Invested $</th>
+                            <th style={{ textAlign: "right" }} title="If this outcome wins, payoff multiple = $1 / current YES. Higher = more asymmetric.">
+                              Payoff×
+                            </th>
+                            <th style={{ textAlign: "right" }}>Total PnL</th>
+                            <th style={{ textAlign: "right" }}>Conviction</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleRows.map((sig, idx) => {
+                            const tier = outcomeTier(sig);
+                            const payoffMult = sig.current_yes_price > 0 ? 1.0 / sig.current_yes_price : 0;
+                            return (
+                              <tr key={sig.condition_id || sig.outcome} style={outcomeTierStyle(tier)}
+                                  title={
+                                    tier === "green" ? "Penny opportunity: cheap entry + real smart money + signal still healthy"
+                                    : tier === "yellow" ? "Borderline penny setup (priced-up or thinner)"
+                                    : tier === "red" ? "Dead outcome (eliminated or already resolved)"
+                                    : "Insufficient signal"
+                                  }>
+                                <td>{detail.ranked_outcomes.indexOf(sig) + 1}</td>
+                                <td>
+                                  <strong>{sig.outcome}</strong>
+                                </td>
+                                <td style={{ textAlign: "right" }}>{sig.current_yes_price.toFixed(4)}</td>
+                                <td style={{ textAlign: "right" }}>{sig.yes_holders_count}</td>
+                                <td style={{ textAlign: "right" }}>{sig.yes_avg_price.toFixed(3)}</td>
+                                <td style={{ textAlign: "right" }}>
+                                  ${sig.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                </td>
+                                <td style={{ textAlign: "right" }}>
+                                  {payoffMult >= 100 ? "—" : `${payoffMult.toFixed(1)}×`}
+                                </td>
+                                <td style={{ textAlign: "right", color: sig.yes_total_pnl >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)" }}>
+                                  {sig.yes_total_pnl >= 0 ? "+" : ""}${sig.yes_total_pnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                </td>
+                                <td style={{ textAlign: "right" }}>
+                                  {sig.smart_conviction.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {visibleRows.length === 0 && (
+                            <tr>
+                              <td colSpan={9} className="muted" style={{ textAlign: "center", padding: "1em" }}>
+                                No penny opportunities at the current filters. Try lowering Min position $ or unchecking the filter.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                );
+              })()}
               {detail.top_3.length > 0 && (
                 <>
                   <h3 style={{ marginTop: "1.5em" }}>Top wallets in top-3 outcomes</h3>
