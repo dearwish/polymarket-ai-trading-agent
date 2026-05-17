@@ -3334,8 +3334,23 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
   }, []);
 
   const summary = data?.summary;
-  const positions = data?.positions ?? [];
-  const openOrders = liveOrders ?? [];
+  const positions = useMemo(() => {
+    // Sort by end-date descending so still-pending markets are at the top
+    // and stale/resolved positions sink to the bottom (where they get
+    // greyed out below).
+    const rows = data?.positions ?? [];
+    return [...rows].sort((a, b) => (b.end_date || "").localeCompare(a.end_date || ""));
+  }, [data]);
+  const openOrders = useMemo(() => {
+    // CLOB `created_at` is a Unix-epoch string. Newest-posted first.
+    const rows = liveOrders ?? [];
+    return [...rows].sort((a, b) => {
+      const ta = Number(a.created_at ?? 0);
+      const tb = Number(b.created_at ?? 0);
+      return tb - ta;
+    });
+  }, [liveOrders]);
+  const NOW_MS = Date.now();
 
   // Net total P&L: unrealised (cash_pnl from currently-open) + realised
   // from already-resolved markets. The Polymarket UI seems to only show
@@ -3430,8 +3445,15 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
                     : 0;
                   const pnlColor = p.cash_pnl_usd >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)";
                   const eventSlug = p.event_slug || p.slug;
+                  const endMs = p.end_date ? Date.parse(p.end_date) : NaN;
+                  const isPast = Number.isFinite(endMs) && endMs < NOW_MS;
+                  const rowStyle: CSSProperties = isPast
+                    ? { opacity: 0.45, backgroundColor: "rgba(128,128,128,0.05)" }
+                    : {};
                   return (
-                    <tr key={`${p.asset}-${p.outcome_index}`}>
+                    <tr key={`${p.asset}-${p.outcome_index}`}
+                        style={rowStyle}
+                        title={isPast ? "Event ended — position is settled, no longer actionable" : undefined}>
                       <td>
                         {eventSlug ? (
                           <a
@@ -3478,12 +3500,19 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
           <h2>Resting open orders · {openOrders.length}</h2>
           {openOrders.length > 0 && (
             <span className="muted" style={{ fontSize: "0.85em" }}>
-              live CLOB orders the operator wallet still has working
+              live CLOB orders the operator wallet still has working · sorted newest-posted first
             </span>
           )}
         </header>
         {openOrders.length === 0 && (
           <p className="muted">No open orders on the CLOB right now.</p>
+        )}
+        {openOrders.some((o) => (o.size_matched ?? 0) > 0 && (o.size_matched ?? 0) < (o.size ?? 0)) && (
+          <div className="muted" style={{ fontSize: "0.85em", marginBottom: "0.5em" }}>
+            <span style={{ borderLeft: "4px solid #c69026", paddingLeft: "0.5em" }}>
+              <strong>Yellow rows</strong> = order is partially filled (some shares executed, rest still resting at the limit price)
+            </span>
+          </div>
         )}
         {openOrders.length > 0 && (
           <div className="table-wrap">
@@ -3515,8 +3544,17 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
                       postedDisplay = o.created_at.slice(0, 19).replace("T", " ");
                     }
                   }
+                  const size = o.size ?? 0;
+                  const filled = o.size_matched ?? 0;
+                  const pctFilled = size > 0 ? (filled / size) * 100 : 0;
+                  const partialFilled = filled > 0 && filled < size;
+                  const rowStyle: CSSProperties = partialFilled
+                    ? { boxShadow: "inset 4px 0 0 0 #c69026", backgroundColor: "rgba(198,144,38,0.06)" }
+                    : {};
                   return (
-                    <tr key={o.order_id}>
+                    <tr key={o.order_id}
+                        style={rowStyle}
+                        title={partialFilled ? `Partially filled: ${filled.toFixed(2)} of ${size.toFixed(2)} shares (${pctFilled.toFixed(0)}%)` : undefined}>
                       <td>
                         {friendlyTitle ? (
                           <div>{friendlyTitle}</div>
@@ -3539,7 +3577,14 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
                       <td style={{ textAlign: "right" }}>
                         {typeof o.price === "number" ? formatCents(o.price) : "—"}
                       </td>
-                      <td style={{ textAlign: "right" }}>{(o.size_matched ?? 0).toFixed(2)}</td>
+                      <td style={{ textAlign: "right" }}>
+                        {filled.toFixed(2)}
+                        {partialFilled && (
+                          <span className="muted" style={{ fontSize: "0.8em", marginLeft: "0.3em" }}>
+                            ({pctFilled.toFixed(0)}%)
+                          </span>
+                        )}
+                      </td>
                       <td className="muted">{o.status}</td>
                       <td className="muted">{postedDisplay}</td>
                     </tr>
