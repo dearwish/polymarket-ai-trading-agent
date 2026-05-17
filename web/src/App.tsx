@@ -4210,6 +4210,122 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
+  // Global instant-tooltip handler — intercepts every `title` attribute in
+  // the app so tooltips appear on hover-enter (0 ms) instead of after the
+  // browser's ~700 ms default. Approach:
+  //   1. Capture mouseover on the document. Walk up from the target to
+  //      find the nearest element with a `title` attribute.
+  //   2. Render our own floating <div> at the element's edge with the
+  //      title text. Remove the element's `title` so the browser doesn't
+  //      ALSO render its delayed native tooltip on top of ours.
+  //   3. Stash the original title in `data-instant-title` so we can put
+  //      it back on mouseout (preserves accessibility for screen
+  //      readers + maintains source-of-truth in the React tree on
+  //      re-render).
+  // This way no JSX site needs to change — every existing `title=` in
+  // the codebase becomes instant.
+  useEffect(() => {
+    let tooltipEl: HTMLDivElement | null = null;
+    let activeEl: Element | null = null;
+
+    function ensureTooltipEl(): HTMLDivElement {
+      if (tooltipEl) return tooltipEl;
+      const el = document.createElement("div");
+      el.className = "instant-tooltip";
+      document.body.appendChild(el);
+      tooltipEl = el;
+      return el;
+    }
+
+    function show(target: Element) {
+      const title = target.getAttribute("title");
+      if (!title) return;
+      // Stash + remove so the browser's delayed tooltip doesn't double up.
+      target.setAttribute("data-instant-title", title);
+      target.removeAttribute("title");
+      activeEl = target;
+      const tip = ensureTooltipEl();
+      tip.textContent = title;
+      // Position above the element by default. Browser will clamp to
+      // viewport via the max-width + the .instant-tooltip-flip rules.
+      const rect = target.getBoundingClientRect();
+      const docX = rect.left + window.scrollX + rect.width / 2;
+      const docY = rect.top + window.scrollY;
+      tip.style.left = `${docX}px`;
+      tip.style.top = `${docY}px`;
+      // requestAnimationFrame so the layout settles before we read
+      // tooltip height for the "flip below if no space above" branch.
+      requestAnimationFrame(() => {
+        if (!tooltipEl || activeEl !== target) return;
+        const tipRect = tooltipEl.getBoundingClientRect();
+        const spaceAbove = rect.top;
+        const place = spaceAbove > tipRect.height + 12 ? "above" : "below";
+        tooltipEl.classList.toggle("instant-tooltip-flip", place === "below");
+        if (place === "below") {
+          tooltipEl.style.top = `${rect.bottom + window.scrollY}px`;
+        }
+        tooltipEl.style.opacity = "1";
+      });
+    }
+
+    function hide(target: Element | null) {
+      if (!target) return;
+      const stashed = target.getAttribute("data-instant-title");
+      if (stashed != null) {
+        target.setAttribute("title", stashed);
+        target.removeAttribute("data-instant-title");
+      }
+      if (tooltipEl) tooltipEl.style.opacity = "0";
+      if (activeEl === target) activeEl = null;
+    }
+
+    function onMouseOver(e: MouseEvent) {
+      const target = e.target as Element | null;
+      if (!target) return;
+      // Walk to nearest titled ancestor. Skip form controls so the
+      // browser's native :title handling for inputs stays normal.
+      const titled = target.closest("[title]") as Element | null;
+      if (!titled) return;
+      const tag = titled.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (titled === activeEl) return;
+      // Moving from one titled element straight into another — hide
+      // the previous one first.
+      if (activeEl) hide(activeEl);
+      show(titled);
+    }
+
+    function onMouseOut(e: MouseEvent) {
+      const target = e.target as Element | null;
+      if (!target) return;
+      const related = e.relatedTarget as Element | null;
+      // Find the titled ancestor of the leaving target; ignore if
+      // we're just moving between children of the same titled element.
+      const titled = target.closest("[data-instant-title]") as Element | null;
+      if (!titled) return;
+      if (related && titled.contains(related)) return;
+      hide(titled);
+    }
+
+    function onScroll() {
+      // Tooltip position is anchored to viewport coords; hide on scroll
+      // rather than reposition (cheaper, and the user has moved on).
+      if (activeEl) hide(activeEl);
+    }
+
+    document.addEventListener("mouseover", onMouseOver);
+    document.addEventListener("mouseout", onMouseOut);
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    return () => {
+      document.removeEventListener("mouseover", onMouseOver);
+      document.removeEventListener("mouseout", onMouseOut);
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      if (activeEl) hide(activeEl);
+      if (tooltipEl?.parentNode) tooltipEl.parentNode.removeChild(tooltipEl);
+      tooltipEl = null;
+    };
+  }, []);
+
   useEffect(() => {
     void refreshDashboard();
   }, []);

@@ -1183,3 +1183,36 @@ th {
   font-size: 14px;
   margin-bottom: 8px;
 }
+
+/* Instant-tooltip — replaces the browser's ~700 ms delayed title tooltip
+   with an immediate (0 ms) custom one. Driven by a global mouseover
+   handler in App.tsx that copies the element's `title` attribute into
+   the .instant-tooltip element below, then restores it on mouseout. */
+.instant-tooltip {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 8px));
+  padding: 0.45em 0.7em;
+  background-color: rgba(20, 22, 26, 0.96);
+  color: #f0f2f5;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  width: max-content;
+  max-width: 340px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.08s ease-out;
+  text-align: left;
+}
+
+/* When the tooltip would clip the top of the viewport, the JS handler
+   re-anchors the top to the element's BOTTOM edge and adds this class
+   so the transform flips it below instead of above. */
+.instant-tooltip-flip {
+  transform: translate(-50%, 8px);
+}
