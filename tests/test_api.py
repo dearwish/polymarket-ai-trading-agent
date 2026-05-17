@@ -588,3 +588,39 @@ def test_api_live_positions_aggregates_summary(monkeypatch) -> None:
     assert p["summary"]["total_current_value_usd"] == 24.0
     assert p["summary"]["total_cash_pnl_usd"] == 4.0
     assert p["summary"]["closed_realized_pnl_usd"] == 75.0
+
+
+def test_api_dashboard_snapshot_includes_live_positions(monkeypatch) -> None:
+    """Dashboard snapshot must include live_positions so the SSE stream can
+    emit it on connect. Stubs the upstream data-api so the test is offline."""
+    import urllib.request
+    fake_positions = [
+        {"asset": "tok-z", "outcome": "Yes", "outcomeIndex": 0,
+         "title": "Will Z win?", "slug": "z-slug", "eventSlug": "z-event",
+         "conditionId": "0xz", "size": 10.0, "avgPrice": 0.10,
+         "curPrice": 0.20, "currentValue": 2.0, "cashPnl": 1.0,
+         "realizedPnl": 0.0, "totalPnl": 1.0, "endDate": "2026-12-31"},
+    ]
+    def fake_urlopen(req, timeout=15):
+        import io, json as _j
+        url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
+        # Return an empty list for the closed-positions + gamma /events calls;
+        # the open positions call gets the fake list.
+        if "closed-positions" in url or "gamma-api" in url:
+            return io.BytesIO(_j.dumps([]).encode())
+        return io.BytesIO(_j.dumps(fake_positions).encode())
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    from polymarket_trading_engine.config import Settings as _S
+    # build_dashboard_snapshot reads funder from service.settings (StubService
+    # defaults to a real .env Settings()), so we override on the stub itself.
+    stub = StubService()
+    stub.settings = _S(polymarket_funder="0xfunder")
+    client = TestClient(create_app(lambda: stub))
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200
+    payload = r.json()
+    assert "live_positions" in payload, "live_positions section missing from /api/dashboard"
+    lp = payload["live_positions"]
+    assert lp["wallet"] == "0xfunder"
+    assert lp["summary"]["count"] == 1
+    assert "condition_meta" in lp

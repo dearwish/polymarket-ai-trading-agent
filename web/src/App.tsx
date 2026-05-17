@@ -700,6 +700,7 @@ type DashboardState = {
   recentDecisions: DecisionItem[];
   liveOrders: LiveOrder[];
   liveTrades: LiveTrade[];
+  livePositions: LivePositionsPayload | null;
   daemonHeartbeat: DaemonHeartbeatPayload | null;
   daemonTicks: DaemonTickPayload[];
   paperActivity: PaperActivityEvent[];
@@ -720,6 +721,7 @@ type DashboardSnapshotPayload = {
   recent_decisions: DecisionsPayload;
   live_orders: LiveOrdersPayload;
   live_trades: LiveTradesPayload;
+  live_positions: LivePositionsPayload;
   daemon_heartbeat: DaemonHeartbeatPayload;
   daemon_ticks: { ticks: DaemonTickPayload[] };
   paper_activity: PaperActivityPayload;
@@ -1018,6 +1020,7 @@ function mapSnapshotToState(snapshot: DashboardSnapshotPayload): DashboardState 
     recentDecisions: snapshot.recent_decisions.decisions,
     liveOrders: snapshot.live_orders.orders,
     liveTrades: snapshot.live_trades.trades,
+    livePositions: snapshot.live_positions ?? null,
     daemonHeartbeat: snapshot.daemon_heartbeat ?? null,
     daemonTicks: snapshot.daemon_ticks?.ticks ?? [],
     paperActivity: snapshot.paper_activity?.events ?? [],
@@ -1053,6 +1056,8 @@ function applyDashboardDelta(current: DashboardState, eventName: string, payload
       return { ...current, liveOrders: (payload as LiveOrdersPayload).orders };
     case "live_trades":
       return { ...current, liveTrades: (payload as LiveTradesPayload).trades };
+    case "live_positions":
+      return { ...current, livePositions: payload as LivePositionsPayload };
     case "daemon_heartbeat":
       return { ...current, daemonHeartbeat: payload as DaemonHeartbeatPayload };
     case "daemon_ticks":
@@ -3316,47 +3321,31 @@ function EventSmartMoneyPage() {
   );
 }
 
-function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
-  const [data, setData] = useState<LivePositionsPayload | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Show the spinner / loading message only on the FIRST fetch. Polling
-  // refreshes happen silently so the table doesn't flash every 30s.
-  const isFirstLoadRef = useRef(true);
-  const refresh = async () => {
-    if (isFirstLoadRef.current) {
-      setLoading(true);
-    }
-    setError(null);
+function LivePortfolioPage({
+  liveOrders,
+  livePositions,
+  onForceRefresh,
+}: {
+  liveOrders: LiveOrder[];
+  livePositions: LivePositionsPayload | null;
+  onForceRefresh: () => Promise<void>;
+}) {
+  // Positions now arrive via the shared dashboard SSE stream (live_positions
+  // event, server-side cached at 30s TTL). The page is a pure consumer —
+  // no local fetching, no polling. The manual refresh button triggers the
+  // full dashboard refresh which forces the server cache to refill on its
+  // next 30s tick.
+  const data = livePositions;
+  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const error = (livePositions as { error?: string } | null)?.error ?? null;
+  const handleRefresh = async () => {
+    setRefreshing(true);
     try {
-      const payload = await fetchJson<LivePositionsPayload>("/api/live/positions");
-      setData(payload);
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      await onForceRefresh();
     } finally {
-      setLoading(false);
-      isFirstLoadRef.current = false;
+      setRefreshing(false);
     }
   };
-
-  // Initial fetch on mount.
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  // Lightweight polling so the page tracks fills + price moves while open.
-  // Orders already update via the existing /api/dashboard/stream SSE feed,
-  // but positions / summary / condition_meta only refresh here.
-  // 30 s is the sweet spot — fast enough to feel live during a partial-fill
-  // sequence, slow enough to not hammer data-api when the tab is idle.
-  const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      void refresh().then(() => setLastRefreshedAt(Date.now()));
-    }, 30_000);
-    return () => window.clearInterval(id);
-  }, []);
 
   const summary = data?.summary;
   const positions = useMemo(() => {
@@ -3404,17 +3393,18 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.3em" }}>
             <button type="button" className="refresh-button"
-                    onClick={() => void refresh().then(() => setLastRefreshedAt(Date.now()))}>
-              Refresh
+                    onClick={() => void handleRefresh()}
+                    disabled={refreshing}>
+              {refreshing ? "Refreshing…" : "Refresh"}
             </button>
             <span className="muted" style={{ fontSize: "0.75em" }}>
-              auto every 30s · last {new Date(lastRefreshedAt).toLocaleTimeString()}
+              streamed · server cache 30s
             </span>
           </div>
         </header>
 
         {error && <div className="banner error" style={{ marginTop: "1em" }}>{error}</div>}
-        {loading && !data && <div className="muted" style={{ marginTop: "1em" }}>Loading positions…</div>}
+        {!data && <div className="muted" style={{ marginTop: "1em" }}>Waiting for first SSE push…</div>}
 
         {summary && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "0.75em", marginTop: "1em" }}>
@@ -3449,7 +3439,7 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
             </span>
           )}
         </header>
-        {positions.length === 0 && !loading && (
+        {positions.length === 0 && data !== null && (
           <p className="muted">No open positions in this wallet.</p>
         )}
         {positions.length > 0 && (
@@ -4126,6 +4116,7 @@ export default function App() {
     recentDecisions: [],
     liveOrders: [],
     liveTrades: [],
+    livePositions: null,
     daemonHeartbeat: null,
     daemonTicks: [],
     paperActivity: [],
@@ -4175,6 +4166,7 @@ export default function App() {
       "recent_decisions",
       "live_orders",
       "live_trades",
+      "live_positions",
       "daemon_heartbeat",
       "daemon_ticks",
       "paper_activity",
@@ -4292,7 +4284,13 @@ export default function App() {
       case "event-signals":
         return <EventSmartMoneyPage />;
       case "live-portfolio":
-        return <LivePortfolioPage liveOrders={state.liveOrders} />;
+        return (
+          <LivePortfolioPage
+            liveOrders={state.liveOrders}
+            livePositions={state.livePositions}
+            onForceRefresh={refreshDashboard}
+          />
+        );
       case "settings":
         return (
           <SettingsPage

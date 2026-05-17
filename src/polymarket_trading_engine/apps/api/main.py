@@ -328,6 +328,12 @@ def create_app(
             "recent_decisions": recent_decisions(limit=500, window_seconds=600, service=service),
             "live_orders": _cached("live_orders", 30.0, lambda: live_orders(service=service)),
             "live_trades": _cached("live_trades", 30.0, lambda: live_trades(limit=20, service=service)),
+            # Live wallet positions via data-api + gamma enrichment.
+            # 30s TTL because the upstream is two external APIs — the
+            # SSE stream still ticks every 1s but dedupes by JSON
+            # equality, so this only re-fetches when the cache expires.
+            "live_positions": _cached("live_positions", 30.0,
+                                      lambda: _safe_live_positions(service.settings)),
             "daemon_heartbeat": _daemon_heartbeat_payload(service.settings),
             "daemon_ticks": _latest_daemon_ticks(service),
             "paper_activity": paper_activity(limit=30, service=service),
@@ -350,6 +356,7 @@ def create_app(
             "recent_decisions": snapshot["recent_decisions"],
             "live_orders": snapshot["live_orders"],
             "live_trades": snapshot["live_trades"],
+            "live_positions": snapshot["live_positions"],
             "daemon_heartbeat": snapshot["daemon_heartbeat"],
             "daemon_ticks": snapshot["daemon_ticks"],
             "paper_activity": snapshot["paper_activity"],
@@ -527,45 +534,27 @@ def create_app(
     def live_orders(service: AgentService = Depends(service_factory)) -> dict:
         return service.live_orders()
 
-    @app.get("/api/live/positions")
-    def live_positions(
-        size_threshold: float = Query(0.1, ge=0.0, le=10000.0,
-                                      description="Skip positions with size below this threshold."),
-        settings: Settings = Depends(settings_factory),
-    ) -> dict:
-        """Live YES/NO positions held by the configured Polymarket funder
-        wallet. Reads ``data-api.polymarket.com/positions`` (public, no
-        auth). Bundles a small summary so the dashboard doesn't have to
-        recompute totals.
-
-        Returns ``{wallet, positions, summary: {count, total_cost_usd,
-        total_current_value_usd, total_cash_pnl_usd}}`` or an empty list
-        when the funder isn't configured."""
+    def _fetch_live_positions(settings: Settings, size_threshold: float = 0.1) -> dict:
+        """Pure data-fetcher for the live positions payload — extracted
+        from the HTTP endpoint so the dashboard streamer can also call it
+        without going through the HTTPException path."""
         import urllib.request as _urllib
         import urllib.parse as _urlparse
         funder = (settings.polymarket_funder or "").strip().lower()
+        empty_payload = {"wallet": "", "positions": [], "condition_meta": {}, "summary": {
+            "count": 0, "total_cost_usd": 0.0,
+            "total_current_value_usd": 0.0, "total_cash_pnl_usd": 0.0,
+            "closed_realized_pnl_usd": 0.0,
+        }}
         if not funder:
-            return {"wallet": "", "positions": [], "summary": {
-                "count": 0, "total_cost_usd": 0.0,
-                "total_current_value_usd": 0.0, "total_cash_pnl_usd": 0.0,
-            }}
+            return empty_payload
         base = settings.polymarket_data_url.rstrip("/")
         url = f"{base}/positions?{_urlparse.urlencode({'user': funder, 'sizeThreshold': size_threshold, 'limit': 100})}"
-        try:
-            req = _urllib.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with _urllib.urlopen(req, timeout=15) as resp:
-                raw = json.loads(resp.read())
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"data-api positions failed: {exc}") from exc
+        req = _urllib.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _urllib.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read())
         if not isinstance(raw, list):
             raw = []
-        # First pass: collect unique event slugs, then fetch each event
-        # once from gamma to build a condition_id → groupItemTitle map.
-        # The data-api positions endpoint only returns the binary market
-        # title ("Will the X win...") which makes the YES/NO outcome
-        # useless for identifying *which* option the operator actually
-        # bet on. groupItemTitle is the canonical option name
-        # ("Colorado Avalanche") used by Polymarket's UI.
         event_slugs = {str(p.get("eventSlug") or "") for p in raw if p.get("eventSlug")}
         option_title_by_cid: dict[str, str] = {}
         event_title_by_cid: dict[str, str] = {}
@@ -586,18 +575,14 @@ def create_app(
                 if not cid:
                     continue
                 option = m.get("groupItemTitle") or ""
-                # groupItemTitle is canonical when present; otherwise
-                # fall back to parsing the market question.
                 if not option:
                     q = str(m.get("question") or "")
-                    # "Will the Colorado Avalanche win ..." → "Colorado Avalanche"
                     import re as _re
                     match = _re.match(r"^Will (?:the )?(.+?) (?:win|beat|defeat|advance|reach|qualify)", q, _re.IGNORECASE)
                     if match:
                         option = match.group(1)
                 option_title_by_cid[cid] = option
                 event_title_by_cid[cid] = ev_title
-
         positions: list[dict] = []
         total_cost = 0.0
         total_current = 0.0
@@ -615,9 +600,6 @@ def create_app(
             total_current += current_value
             total_cash_pnl += cash_pnl
             cid = str(p.get("conditionId") or "")
-            # For YES/NO outcomes the option name is the team/candidate
-            # (groupItemTitle). For directional outcomes ("Up", "Down")
-            # the outcome string itself IS the option, so fall back to it.
             raw_outcome = str(p.get("outcome", ""))
             option_title = option_title_by_cid.get(cid, "")
             if not option_title and raw_outcome and raw_outcome.lower() not in {"yes", "no"}:
@@ -643,8 +625,6 @@ def create_app(
                 "end_date": p.get("endDate", ""),
                 "icon": p.get("icon", ""),
             })
-        # Closed positions account for realized PnL on already-settled
-        # markets. Optional second call — non-fatal if it fails.
         closed_pnl = 0.0
         try:
             closed_url = f"{base}/closed-positions?{_urlparse.urlencode({'user': funder, 'limit': 200})}"
@@ -655,12 +635,6 @@ def create_app(
                 closed_pnl = sum(float(p.get("realizedPnl") or 0) for p in closed_raw)
         except Exception:
             pass
-        # Expose the condition_id → option/event map so the frontend can
-        # also enrich CLOB orders that don't match any held position via
-        # asset_id (e.g. a working BUY on a market the operator hasn't
-        # entered yet). Gamma /events returns every market in the same
-        # event, so if the order is on the same underlying event as any
-        # held position the enrichment is already in this map for free.
         condition_meta = {
             cid: {
                 "option_title": option_title_by_cid.get(cid, ""),
@@ -680,6 +654,40 @@ def create_app(
                 "closed_realized_pnl_usd": round(closed_pnl, 2),
             },
         }
+
+    def _safe_live_positions(settings: Settings) -> dict:
+        """SSE-friendly wrapper: swallows upstream errors so a transient
+        data-api hiccup doesn't bring down the dashboard stream."""
+        try:
+            return _fetch_live_positions(settings)
+        except Exception as exc:
+            return {
+                "wallet": "",
+                "positions": [],
+                "condition_meta": {},
+                "summary": {
+                    "count": 0, "total_cost_usd": 0.0,
+                    "total_current_value_usd": 0.0, "total_cash_pnl_usd": 0.0,
+                    "closed_realized_pnl_usd": 0.0,
+                },
+                "error": f"upstream error: {exc}",
+            }
+
+    @app.get("/api/live/positions")
+    def live_positions(
+        size_threshold: float = Query(0.1, ge=0.0, le=10000.0,
+                                      description="Skip positions with size below this threshold."),
+        settings: Settings = Depends(settings_factory),
+    ) -> dict:
+        """Live YES/NO positions held by the configured Polymarket funder
+        wallet. Reads ``data-api.polymarket.com/positions`` (public, no
+        auth). Bundles a small summary so the dashboard doesn't have to
+        recompute totals."""
+        try:
+            return _fetch_live_positions(settings, size_threshold=size_threshold)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"data-api positions failed: {exc}") from exc
+
 
     @app.get("/api/live/trades")
     def live_trades(
