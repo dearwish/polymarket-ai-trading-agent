@@ -1,6 +1,38 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
-type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "event-signals" | "settings" | "daemon";
+type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "event-signals" | "live-portfolio" | "settings" | "daemon";
+
+type LivePosition = {
+  title: string;
+  slug: string;
+  event_slug: string;
+  outcome: string;
+  outcome_index: number | null;
+  asset: string;
+  condition_id: string;
+  size: number;
+  avg_price: number;
+  current_price: number;
+  cost_usd: number;
+  current_value_usd: number;
+  cash_pnl_usd: number;
+  realized_pnl_usd: number;
+  total_pnl_usd: number;
+  end_date: string;
+  icon: string;
+};
+
+type LivePositionsPayload = {
+  wallet: string;
+  positions: LivePosition[];
+  summary: {
+    count: number;
+    total_cost_usd: number;
+    total_current_value_usd: number;
+    total_cash_pnl_usd: number;
+    closed_realized_pnl_usd: number;
+  };
+};
 
 type EventSnapshotPick = {
   country?: string;
@@ -696,6 +728,7 @@ const VIEWS: Array<{ key: ViewKey; label: string }> = [
   { key: "portfolio", label: "Portfolio" },
   { key: "events", label: "Event Log" },
   { key: "event-signals", label: "Event Signals" },
+  { key: "live-portfolio", label: "Live Portfolio" },
   { key: "settings", label: "Settings" },
   { key: "daemon", label: "Daemon" },
 ];
@@ -3278,6 +3311,266 @@ function EventSmartMoneyPage() {
   );
 }
 
+function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
+  const [data, setData] = useState<LivePositionsPayload | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = await fetchJson<LivePositionsPayload>("/api/live/positions");
+      setData(payload);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const summary = data?.summary;
+  const positions = data?.positions ?? [];
+  const openOrders = liveOrders ?? [];
+
+  // Net total P&L: unrealised (cash_pnl from currently-open) + realised
+  // from already-resolved markets. The Polymarket UI seems to only show
+  // unrealized; combining gives the operator the full picture.
+  const lifetimePnl = summary
+    ? summary.total_cash_pnl_usd + summary.closed_realized_pnl_usd
+    : 0;
+
+  return (
+    <section className="page-section">
+      <article className="card">
+        <header className="card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1em", flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Live Polymarket Portfolio</h2>
+            <p className="muted" style={{ marginTop: "0.25em", marginBottom: 0, fontSize: "0.9em" }}>
+              On-chain positions held by the configured funder wallet.
+              Polled directly from <code>data-api.polymarket.com/positions</code> — independent of
+              the engine's own paper/live order book.
+              {data?.wallet && (
+                <>
+                  {" "}Wallet: <code>{data.wallet.slice(0, 8)}…{data.wallet.slice(-4)}</code>
+                  {" "}<a href={`https://polygonscan.com/address/${data.wallet}`} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>↗</a>
+                </>
+              )}
+            </p>
+          </div>
+          <button type="button" className="refresh-button" onClick={() => void refresh()}>
+            Refresh
+          </button>
+        </header>
+
+        {error && <div className="banner error" style={{ marginTop: "1em" }}>{error}</div>}
+        {loading && !data && <div className="muted" style={{ marginTop: "1em" }}>Loading positions…</div>}
+
+        {summary && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "0.75em", marginTop: "1em" }}>
+            <SummaryTile label="Open positions" value={summary.count.toString()} />
+            <SummaryTile label="Deployed cost" value={`$${summary.total_cost_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
+            <SummaryTile label="Current value" value={`$${summary.total_current_value_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
+            <SummaryTile
+              label="Unrealised P&L"
+              value={`${summary.total_cash_pnl_usd >= 0 ? "+" : ""}$${summary.total_cash_pnl_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              tone={summary.total_cash_pnl_usd >= 0 ? "positive" : "negative"}
+            />
+            <SummaryTile
+              label="Closed realised"
+              value={`${summary.closed_realized_pnl_usd >= 0 ? "+" : ""}$${summary.closed_realized_pnl_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              tone={summary.closed_realized_pnl_usd >= 0 ? "positive" : "negative"}
+            />
+            <SummaryTile
+              label="Lifetime P&L"
+              value={`${lifetimePnl >= 0 ? "+" : ""}$${lifetimePnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              tone={lifetimePnl >= 0 ? "positive" : "negative"}
+            />
+          </div>
+        )}
+      </article>
+
+      <article className="card">
+        <header className="card-header">
+          <h2>Open positions · {positions.length}</h2>
+          {positions.length > 0 && (
+            <span className="muted" style={{ fontSize: "0.85em" }}>
+              held YES/NO tokens with non-trivial size
+            </span>
+          )}
+        </header>
+        {positions.length === 0 && !loading && (
+          <p className="muted">No open positions in this wallet.</p>
+        )}
+        {positions.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Market</th>
+                  <th>Outcome</th>
+                  <th style={{ textAlign: "right" }}>Size</th>
+                  <th style={{ textAlign: "right" }}>Avg paid</th>
+                  <th style={{ textAlign: "right" }}>Current</th>
+                  <th style={{ textAlign: "right" }}>Cost</th>
+                  <th style={{ textAlign: "right" }}>Value</th>
+                  <th style={{ textAlign: "right" }}>P&L</th>
+                  <th style={{ textAlign: "right" }}>% move</th>
+                  <th>End</th>
+                </tr>
+              </thead>
+              <tbody>
+                {positions.map((p) => {
+                  const pctMove = p.avg_price > 0
+                    ? ((p.current_price - p.avg_price) / p.avg_price) * 100
+                    : 0;
+                  const pnlColor = p.cash_pnl_usd >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)";
+                  const eventSlug = p.event_slug || p.slug;
+                  return (
+                    <tr key={`${p.asset}-${p.outcome_index}`}>
+                      <td>
+                        {eventSlug ? (
+                          <a
+                            href={`https://polymarket.com/event/${encodeURIComponent(eventSlug)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: "inherit", textDecoration: "underline" }}
+                          >
+                            {p.title}
+                          </a>
+                        ) : (
+                          p.title
+                        )}
+                      </td>
+                      <td>
+                        <span className={`pill ${p.outcome_index === 0 ? "positive" : "negative"}`}
+                              style={{ padding: "0.1em 0.5em", fontSize: "0.85em" }}>
+                          {p.outcome}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: "right" }}>{p.size.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                      <td style={{ textAlign: "right" }}>{formatCents(p.avg_price)}</td>
+                      <td style={{ textAlign: "right" }}>{formatCents(p.current_price)}</td>
+                      <td style={{ textAlign: "right" }}>${p.cost_usd.toFixed(2)}</td>
+                      <td style={{ textAlign: "right" }}>${p.current_value_usd.toFixed(2)}</td>
+                      <td style={{ textAlign: "right", color: pnlColor }}>
+                        {p.cash_pnl_usd >= 0 ? "+" : ""}${p.cash_pnl_usd.toFixed(2)}
+                      </td>
+                      <td style={{ textAlign: "right", color: pnlColor }}>
+                        {pctMove >= 0 ? "+" : ""}{pctMove.toFixed(1)}%
+                      </td>
+                      <td className="muted">{p.end_date ? p.end_date.slice(0, 10) : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </article>
+
+      <article className="card">
+        <header className="card-header">
+          <h2>Resting open orders · {openOrders.length}</h2>
+          {openOrders.length > 0 && (
+            <span className="muted" style={{ fontSize: "0.85em" }}>
+              live CLOB orders the operator wallet still has working
+            </span>
+          )}
+        </header>
+        {openOrders.length === 0 && (
+          <p className="muted">No open orders on the CLOB right now.</p>
+        )}
+        {openOrders.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Market</th>
+                  <th>Side</th>
+                  <th style={{ textAlign: "right" }}>Size</th>
+                  <th style={{ textAlign: "right" }}>Limit</th>
+                  <th style={{ textAlign: "right" }}>Filled</th>
+                  <th>Status</th>
+                  <th>Posted</th>
+                </tr>
+              </thead>
+              <tbody>
+                {openOrders.map((o) => {
+                  // Cross-reference asset_id to known positions for friendly titles.
+                  const matchedPos = positions.find((p) => p.asset === o.asset_id);
+                  const friendlyTitle = matchedPos?.title;
+                  const friendlySide = matchedPos?.outcome;
+                  // created_at is a Unix epoch string from the CLOB.
+                  let postedDisplay = "—";
+                  if (o.created_at) {
+                    const ts = Number(o.created_at);
+                    if (Number.isFinite(ts) && ts > 0) {
+                      postedDisplay = new Date(ts * 1000).toISOString().slice(0, 19).replace("T", " ");
+                    } else {
+                      postedDisplay = o.created_at.slice(0, 19).replace("T", " ");
+                    }
+                  }
+                  return (
+                    <tr key={o.order_id}>
+                      <td>
+                        {friendlyTitle ? (
+                          <div>{friendlyTitle}</div>
+                        ) : (
+                          <div className="muted" style={{ fontSize: "0.85em" }}>
+                            <code>{(o.market_id ?? "").slice(0, 12)}…</code>
+                          </div>
+                        )}
+                        <div className="muted" style={{ fontSize: "0.8em" }}>
+                          {friendlySide ? `${friendlySide} · ` : ""}token <code>{(o.asset_id ?? "").slice(0, 10)}…</code>
+                        </div>
+                      </td>
+                      <td>
+                        <span className={`pill ${o.side === "BUY" ? "positive" : "negative"}`}
+                              style={{ padding: "0.1em 0.5em", fontSize: "0.85em" }}>
+                          {o.side ?? "—"}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: "right" }}>{(o.size ?? 0).toFixed(2)}</td>
+                      <td style={{ textAlign: "right" }}>
+                        {typeof o.price === "number" ? formatCents(o.price) : "—"}
+                      </td>
+                      <td style={{ textAlign: "right" }}>{(o.size_matched ?? 0).toFixed(2)}</td>
+                      <td className="muted">{o.status}</td>
+                      <td className="muted">{postedDisplay}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </article>
+    </section>
+  );
+}
+
+function SummaryTile({ label, value, tone }: { label: string; value: string; tone?: "positive" | "negative" }) {
+  const color = tone === "positive" ? "var(--positive, #2a8a3e)"
+    : tone === "negative" ? "var(--negative, #c0392b)"
+    : undefined;
+  return (
+    <div style={{
+      padding: "0.6em 0.9em",
+      borderRadius: 6,
+      backgroundColor: "rgba(255,255,255,0.03)",
+      border: "1px solid rgba(255,255,255,0.07)",
+    }}>
+      <div className="muted" style={{ fontSize: "0.75em", textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</div>
+      <div style={{ fontSize: "1.2em", fontWeight: 600, color }}>{value}</div>
+    </div>
+  );
+}
+
 function SettingsPage({
   settings,
   onSettingsUpdated,
@@ -3877,6 +4170,9 @@ export default function App() {
       case "event-signals":
         // The component manages its own fetch — no shared state to summarize.
         return [];
+      case "live-portfolio":
+        // Self-managed fetch — InfoBar is hidden for this view.
+        return [];
       case "settings":
         return [
           { label: "Fields", value: Object.keys(state.settings?.fields ?? {}).length },
@@ -3899,6 +4195,8 @@ export default function App() {
         return <EventsPage events={state.recentEvents} report={state.report} />;
       case "event-signals":
         return <EventSmartMoneyPage />;
+      case "live-portfolio":
+        return <LivePortfolioPage liveOrders={state.liveOrders} />;
       case "settings":
         return (
           <SettingsPage
@@ -3994,7 +4292,7 @@ export default function App() {
       {loading && <div className="banner">Loading dashboard...</div>}
       {error && <div className="banner error">{error}</div>}
 
-      {activeView !== "daemon" && activeView !== "event-signals" && <InfoBar heartbeat={state.daemonHeartbeat} items={infoBarItems} />}
+      {activeView !== "daemon" && activeView !== "event-signals" && activeView !== "live-portfolio" && <InfoBar heartbeat={state.daemonHeartbeat} items={infoBarItems} />}
       {currentView}
     </div>
   );

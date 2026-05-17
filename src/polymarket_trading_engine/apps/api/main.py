@@ -527,6 +527,97 @@ def create_app(
     def live_orders(service: AgentService = Depends(service_factory)) -> dict:
         return service.live_orders()
 
+    @app.get("/api/live/positions")
+    def live_positions(
+        size_threshold: float = Query(0.1, ge=0.0, le=10000.0,
+                                      description="Skip positions with size below this threshold."),
+        settings: Settings = Depends(settings_factory),
+    ) -> dict:
+        """Live YES/NO positions held by the configured Polymarket funder
+        wallet. Reads ``data-api.polymarket.com/positions`` (public, no
+        auth). Bundles a small summary so the dashboard doesn't have to
+        recompute totals.
+
+        Returns ``{wallet, positions, summary: {count, total_cost_usd,
+        total_current_value_usd, total_cash_pnl_usd}}`` or an empty list
+        when the funder isn't configured."""
+        import urllib.request as _urllib
+        import urllib.parse as _urlparse
+        funder = (settings.polymarket_funder or "").strip().lower()
+        if not funder:
+            return {"wallet": "", "positions": [], "summary": {
+                "count": 0, "total_cost_usd": 0.0,
+                "total_current_value_usd": 0.0, "total_cash_pnl_usd": 0.0,
+            }}
+        base = settings.polymarket_data_url.rstrip("/")
+        url = f"{base}/positions?{_urlparse.urlencode({'user': funder, 'sizeThreshold': size_threshold, 'limit': 100})}"
+        try:
+            req = _urllib.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _urllib.urlopen(req, timeout=15) as resp:
+                raw = json.loads(resp.read())
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"data-api positions failed: {exc}") from exc
+        if not isinstance(raw, list):
+            raw = []
+        positions: list[dict] = []
+        total_cost = 0.0
+        total_current = 0.0
+        total_cash_pnl = 0.0
+        for p in raw:
+            size = float(p.get("size") or 0)
+            if size < size_threshold:
+                continue
+            avg_price = float(p.get("avgPrice") or 0)
+            cur_price = float(p.get("curPrice") or 0)
+            cost = size * avg_price
+            current_value = float(p.get("currentValue") or (size * cur_price))
+            cash_pnl = float(p.get("cashPnl") or (current_value - cost))
+            total_cost += cost
+            total_current += current_value
+            total_cash_pnl += cash_pnl
+            positions.append({
+                "title": p.get("title", ""),
+                "slug": p.get("slug", ""),
+                "event_slug": p.get("eventSlug", ""),
+                "outcome": p.get("outcome", ""),
+                "outcome_index": p.get("outcomeIndex"),
+                "asset": str(p.get("asset", "")),
+                "condition_id": p.get("conditionId", ""),
+                "size": size,
+                "avg_price": avg_price,
+                "current_price": cur_price,
+                "cost_usd": cost,
+                "current_value_usd": current_value,
+                "cash_pnl_usd": cash_pnl,
+                "realized_pnl_usd": float(p.get("realizedPnl") or 0),
+                "total_pnl_usd": float(p.get("totalPnl") or (cash_pnl + float(p.get("realizedPnl") or 0))),
+                "end_date": p.get("endDate", ""),
+                "icon": p.get("icon", ""),
+            })
+        # Closed positions account for realized PnL on already-settled
+        # markets. Optional second call — non-fatal if it fails.
+        closed_pnl = 0.0
+        try:
+            closed_url = f"{base}/closed-positions?{_urlparse.urlencode({'user': funder, 'limit': 200})}"
+            req = _urllib.Request(closed_url, headers={"User-Agent": "Mozilla/5.0"})
+            with _urllib.urlopen(req, timeout=15) as resp:
+                closed_raw = json.loads(resp.read())
+            if isinstance(closed_raw, list):
+                closed_pnl = sum(float(p.get("realizedPnl") or 0) for p in closed_raw)
+        except Exception:
+            pass
+        return {
+            "wallet": funder,
+            "positions": positions,
+            "summary": {
+                "count": len(positions),
+                "total_cost_usd": round(total_cost, 2),
+                "total_current_value_usd": round(total_current, 2),
+                "total_cash_pnl_usd": round(total_cash_pnl, 2),
+                "closed_realized_pnl_usd": round(closed_pnl, 2),
+            },
+        }
+
     @app.get("/api/live/trades")
     def live_trades(
         market_id: str | None = Query(default=None),

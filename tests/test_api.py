@@ -528,3 +528,63 @@ def test_api_event_smart_money_book_happy_path(monkeypatch) -> None:
     assert payload["estimate"]["target_usd"] == 50
     assert payload["estimate"]["fully_filled"] is True
     assert payload["estimate"]["avg_price"] == 0.40
+
+
+def test_api_live_positions_empty_funder() -> None:
+    """No funder configured → returns an empty payload, not 500."""
+    from polymarket_trading_engine.config import Settings as _S
+    client = TestClient(create_app(
+        lambda: StubService(),
+        settings_factory=lambda: _S(polymarket_funder=""),
+        base_settings_factory=lambda: _S(polymarket_funder=""),
+    ))
+    r = client.get("/api/live/positions")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["wallet"] == ""
+    assert payload["positions"] == []
+    assert payload["summary"]["count"] == 0
+
+
+def test_api_live_positions_aggregates_summary(monkeypatch) -> None:
+    """Stubs the data-api response and verifies that totals are
+    summed from per-position rows."""
+    import urllib.request
+
+    fake_positions = [
+        {"asset": "tok-a", "outcome": "Yes", "outcomeIndex": 0,
+         "title": "Will A win?", "slug": "a-slug", "eventSlug": "a-event",
+         "conditionId": "0xa", "size": 100.0, "avgPrice": 0.10,
+         "curPrice": 0.15, "currentValue": 15.0, "cashPnl": 5.0,
+         "realizedPnl": 0.0, "totalPnl": 5.0, "endDate": "2026-12-31"},
+        {"asset": "tok-b", "outcome": "No", "outcomeIndex": 1,
+         "title": "Will B win?", "slug": "b-slug", "eventSlug": "b-event",
+         "conditionId": "0xb", "size": 50.0, "avgPrice": 0.20,
+         "curPrice": 0.18, "currentValue": 9.0, "cashPnl": -1.0,
+         "realizedPnl": 0.0, "totalPnl": -1.0, "endDate": "2026-12-31"},
+    ]
+    fake_closed = [{"realizedPnl": 100.0}, {"realizedPnl": -25.0}]
+
+    def fake_urlopen(req, timeout=15):
+        url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
+        import io, json as _j
+        payload = fake_closed if "closed-positions" in url else fake_positions
+        return io.BytesIO(_j.dumps(payload).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    from polymarket_trading_engine.config import Settings as _S
+    client = TestClient(create_app(
+        lambda: StubService(),
+        settings_factory=lambda: _S(polymarket_funder="0xfunder"),
+        base_settings_factory=lambda: _S(polymarket_funder="0xfunder"),
+    ))
+    r = client.get("/api/live/positions")
+    assert r.status_code == 200
+    p = r.json()
+    assert p["wallet"] == "0xfunder"
+    assert len(p["positions"]) == 2
+    assert p["summary"]["total_cost_usd"] == 20.0
+    assert p["summary"]["total_current_value_usd"] == 24.0
+    assert p["summary"]["total_cash_pnl_usd"] == 4.0
+    assert p["summary"]["closed_realized_pnl_usd"] == 75.0
