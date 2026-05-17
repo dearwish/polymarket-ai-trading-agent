@@ -496,3 +496,35 @@ def test_api_event_smart_money_archive_reads_jsonl(tmp_path, monkeypatch) -> Non
     a_event = next(s for s in snaps if s["slug"] == "a-event")
     assert a_event["snapshot_date"] == "2026-05-17"
     assert a_event["top10"][0]["country"] == "New"
+
+
+def test_api_event_smart_money_book_happy_path(monkeypatch) -> None:
+    """Verifies the book endpoint stitches fetch_orderbook + estimate_fill
+    into a single payload and that the cache key includes target_usd
+    (different sizes mustn't share a cache slot)."""
+    from polymarket_trading_engine.apps.api import main as api_main
+
+    fake_book = {
+        "token_id": "tok-1",
+        "bids": [{"price": 0.39, "size": 100, "cum_usd": 39}],
+        "asks": [
+            {"price": 0.40, "size": 200, "cum_usd": 80},
+            {"price": 0.41, "size": 1000, "cum_usd": 490},
+        ],
+        "best_bid": 0.39,
+        "best_ask": 0.40,
+        "spread": 0.01,
+        "bid_depth_usd_top_n": 39,
+        "ask_depth_usd_top_n": 490,
+    }
+    monkeypatch.setattr(api_main, "fetch_orderbook", lambda token_id: fake_book)
+
+    client = TestClient(create_app(lambda: StubService()))
+    r = client.get("/api/event-smart-money-book/tok-1?target_usd=50")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["best_bid"] == 0.39
+    assert payload["best_ask"] == 0.40
+    assert payload["estimate"]["target_usd"] == 50
+    assert payload["estimate"]["fully_filled"] is True
+    assert payload["estimate"]["avg_price"] == 0.40

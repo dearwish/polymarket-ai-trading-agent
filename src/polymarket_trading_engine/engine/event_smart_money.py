@@ -29,6 +29,7 @@ from typing import Any
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 GAMMA_MARKET_URL = "https://gamma-api.polymarket.com/markets"
 POSITIONS_URL = "https://data-api.polymarket.com/v1/market-positions"
+CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 
 
 class EventNotFoundError(LookupError):
@@ -63,6 +64,12 @@ class OutcomeSignal:
     no_total_size_usd: float = 0.0
     no_avg_price: float = 0.0
     smart_conviction: float = 0.0
+    # CLOB token IDs — needed to fetch the order book for either side
+    # of this outcome. Populated by analyze_event from gamma /markets
+    # `clobTokenIds` field. None when the gamma call doesn't return them
+    # (rare; happens for unusual market types).
+    yes_token_id: str | None = None
+    no_token_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +84,8 @@ class OutcomeSignal:
             "yes_avg_price": self.yes_avg_price,
             "yes_top_wallets": self.yes_top_wallets,
             "smart_conviction": self.smart_conviction,
+            "yes_token_id": self.yes_token_id,
+            "no_token_id": self.no_token_id,
         }
 
 
@@ -87,11 +96,15 @@ def fetch_event(slug: str) -> dict:
     return data[0]
 
 
-def fetch_market_state(condition_id: str) -> tuple[float, float, bool]:
-    """Return (yes_price, no_price, closed) using the live per-market query.
+def fetch_market_detail(condition_id: str) -> dict:
+    """Return {yes_price, no_price, closed, yes_token_id, no_token_id}
+    using the live per-market query.
 
-    The default gamma /markets endpoint filters out closed markets, so when
-    the first call returns an empty list we retry with ``closed=true``."""
+    The default gamma /markets endpoint filters out closed markets, so
+    when the first call returns an empty list we retry with
+    ``closed=true``. When the gamma call fails or returns no data the
+    function returns a dict with zeros / Nones so callers can still
+    pattern-match without try/except."""
     payload: list | None = None
     for params in (
         {"condition_ids": condition_id},
@@ -100,12 +113,14 @@ def fetch_market_state(condition_id: str) -> tuple[float, float, bool]:
         try:
             d = _http_get(GAMMA_MARKET_URL, params)
         except Exception:
-            return 0.0, 0.0, False
+            return {"yes_price": 0.0, "no_price": 0.0, "closed": False,
+                    "yes_token_id": None, "no_token_id": None}
         if isinstance(d, list) and d:
             payload = d
             break
     if not payload:
-        return 0.0, 0.0, False
+        return {"yes_price": 0.0, "no_price": 0.0, "closed": False,
+                "yes_token_id": None, "no_token_id": None}
     m = payload[0]
     px = m.get("outcomePrices")
     if isinstance(px, str):
@@ -116,7 +131,128 @@ def fetch_market_state(condition_id: str) -> tuple[float, float, bool]:
     yes = float(px[0]) if px else 0.0
     no = float(px[1]) if (px and len(px) > 1) else 0.0
     closed = bool(m.get("closed") or m.get("isResolved"))
-    return yes, no, closed
+    token_ids = m.get("clobTokenIds")
+    if isinstance(token_ids, str):
+        try:
+            token_ids = json.loads(token_ids)
+        except Exception:
+            token_ids = None
+    yes_tid = str(token_ids[0]) if isinstance(token_ids, list) and len(token_ids) > 0 else None
+    no_tid = str(token_ids[1]) if isinstance(token_ids, list) and len(token_ids) > 1 else None
+    return {"yes_price": yes, "no_price": no, "closed": closed,
+            "yes_token_id": yes_tid, "no_token_id": no_tid}
+
+
+def fetch_market_state(condition_id: str) -> tuple[float, float, bool]:
+    """Backwards-compatible wrapper over :func:`fetch_market_detail`.
+    Older callers (scripts, the backtest runner) want just the price /
+    closed tuple — keep this shape stable so the wider script ecosystem
+    doesn't have to update in lockstep with engine internals."""
+    detail = fetch_market_detail(condition_id)
+    return detail["yes_price"], detail["no_price"], detail["closed"]
+
+
+def fetch_orderbook(token_id: str, *, depth: int = 10) -> dict:
+    """Return live CLOB order book for a single Polymarket outcome token.
+
+    Polymarket's clob.polymarket.com/book endpoint is unauthenticated
+    and returns top-of-book on both sides as ``{bids: [...], asks: [...]}``.
+    Each level is a ``{price: str, size: str}`` pair. This function
+    normalises the response to a depth-capped list of floats plus
+    cumulative-dollar markers so the dashboard can answer "if I buy $50
+    of YES, what avg price would I pay?" without re-computing on the
+    client side."""
+    try:
+        d = _http_get(CLOB_BOOK_URL, {"token_id": token_id})
+    except Exception as exc:
+        return {"error": str(exc), "bids": [], "asks": [],
+                "best_bid": None, "best_ask": None, "spread": None,
+                "bid_depth_usd_top_n": 0.0, "ask_depth_usd_top_n": 0.0}
+    if not isinstance(d, dict) or "error" in d:
+        return {"error": str(d.get("error") if isinstance(d, dict) else "no data"),
+                "bids": [], "asks": [],
+                "best_bid": None, "best_ask": None, "spread": None,
+                "bid_depth_usd_top_n": 0.0, "ask_depth_usd_top_n": 0.0}
+
+    raw_bids = d.get("bids") or []
+    raw_asks = d.get("asks") or []
+    bids = sorted(
+        ({"price": float(b["price"]), "size": float(b["size"])} for b in raw_bids if "price" in b),
+        key=lambda level: -level["price"],
+    )[:depth]
+    asks = sorted(
+        ({"price": float(a["price"]), "size": float(a["size"])} for a in raw_asks if "price" in a),
+        key=lambda level: level["price"],
+    )[:depth]
+    # Cumulative $ to absorb at each level — answers "how much can I move
+    # before slipping past this price?". Computed in dollar terms because
+    # that's how the operator sizes positions.
+    cum = 0.0
+    for level in bids:
+        cum += level["price"] * level["size"]
+        level["cum_usd"] = cum
+    cum = 0.0
+    for level in asks:
+        cum += level["price"] * level["size"]
+        level["cum_usd"] = cum
+
+    best_bid = bids[0]["price"] if bids else None
+    best_ask = asks[0]["price"] if asks else None
+    spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else None
+    return {
+        "token_id": token_id,
+        "bids": bids,
+        "asks": asks,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "midpoint": (best_bid + best_ask) / 2 if (best_bid is not None and best_ask is not None) else None,
+        "spread": spread,
+        "bid_depth_usd_top_n": bids[-1]["cum_usd"] if bids else 0.0,
+        "ask_depth_usd_top_n": asks[-1]["cum_usd"] if asks else 0.0,
+    }
+
+
+def estimate_fill(book: dict, target_usd: float, side: str = "buy") -> dict:
+    """Walk the relevant side of the book to estimate the avg fill price
+    for spending ``target_usd``. ``side="buy"`` walks asks (we're buying
+    YES from sellers); ``side="sell"`` walks bids.
+
+    Returns ``{filled_usd, filled_shares, avg_price, max_price, fully_filled}``.
+    ``fully_filled`` is False when the visible book doesn't absorb the
+    full target — the operator probably should not size that big."""
+    levels = book.get("asks") if side == "buy" else book.get("bids")
+    levels = levels or []
+    if target_usd <= 0 or not levels:
+        return {"filled_usd": 0.0, "filled_shares": 0.0, "avg_price": 0.0,
+                "max_price": 0.0, "fully_filled": False}
+    remaining = float(target_usd)
+    filled_usd = 0.0
+    filled_shares = 0.0
+    max_price = 0.0
+    for level in levels:
+        price = float(level["price"])
+        size = float(level["size"])
+        level_usd = price * size
+        if remaining <= level_usd:
+            shares = remaining / price
+            filled_usd += remaining
+            filled_shares += shares
+            max_price = price
+            remaining = 0.0
+            break
+        # take the whole level
+        filled_usd += level_usd
+        filled_shares += size
+        max_price = price
+        remaining -= level_usd
+    avg_price = filled_usd / filled_shares if filled_shares > 0 else 0.0
+    return {
+        "filled_usd": filled_usd,
+        "filled_shares": filled_shares,
+        "avg_price": avg_price,
+        "max_price": max_price,
+        "fully_filled": remaining <= 1e-6,
+    }
 
 
 def fetch_holders(condition_id: str, limit: int = 30) -> tuple[list[dict], list[dict]]:
@@ -219,12 +355,15 @@ def analyze_event(
         if not cid:
             continue
         try:
-            yes, no, closed = fetch_market_state(cid)
+            detail = fetch_market_detail(cid)
             yes_h, no_h = fetch_holders(cid, top_holders)
         except Exception:
             continue
-        sig = score_outcome(outcome, cid, yes, no, closed, yes_h, no_h,
+        sig = score_outcome(outcome, cid, detail["yes_price"], detail["no_price"],
+                            detail["closed"], yes_h, no_h,
                             min_position_usd, min_avg_price)
+        sig.yes_token_id = detail.get("yes_token_id")
+        sig.no_token_id = detail.get("no_token_id")
         signals.append(sig)
         if per_market_delay_seconds > 0:
             time.sleep(per_market_delay_seconds)

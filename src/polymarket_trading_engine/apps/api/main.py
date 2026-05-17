@@ -23,6 +23,8 @@ from polymarket_trading_engine.config import (
 from polymarket_trading_engine.engine.event_smart_money import (
     EventNotFoundError,
     analyze_event,
+    estimate_fill,
+    fetch_orderbook,
 )
 from polymarket_trading_engine.service import AgentService
 
@@ -739,6 +741,40 @@ def create_app(
         # Sort by end_date ascending — closest-to-resolution first.
         ordered = sorted(latest.values(), key=lambda r: r.get("end_date") or "9999")
         return {"snapshots": ordered, "total_records": total}
+
+    @app.get("/api/event-smart-money-book/{token_id}")
+    def event_smart_money_book(
+        token_id: str,
+        target_usd: float = Query(50.0, ge=0, le=100_000,
+                                  description="Hypothetical buy size for the fill-estimate."),
+    ) -> dict:
+        """Live order-book depth for a single Polymarket outcome token.
+
+        Returns top-10 bids + top-10 asks (with cumulative $ per level)
+        plus an ``estimate`` block showing what avg price a ``target_usd``
+        market buy would actually get. Used by the dashboard's per-row
+        depth expansion to surface the "can I mirror N dollars without
+        moving the price?" question.
+
+        Cached 30s per token_id — the book ticks faster than the snapshot
+        cron but slower than the user clicks ~through; 30s is the rough
+        sweet spot."""
+        cache_key = f"book:{token_id}:{target_usd}"
+        try:
+            return _cached(cache_key, 30.0, lambda: _book_payload(token_id, target_usd))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"upstream error: {exc}") from exc
+
+    def _book_payload(token_id: str, target_usd: float) -> dict:
+        book = fetch_orderbook(token_id)
+        if book.get("error"):
+            return book
+        estimate = estimate_fill(book, target_usd, side="buy")
+        book["estimate"] = {
+            "target_usd": target_usd,
+            **estimate,
+        }
+        return book
 
     @app.get("/api/event-smart-money/{slug}")
     def event_smart_money(

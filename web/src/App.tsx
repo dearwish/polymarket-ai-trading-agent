@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "event-signals" | "settings" | "daemon";
 
@@ -46,7 +46,33 @@ type EventSmartMoneyRanked = {
   yes_avg_price: number;
   yes_top_wallets: EventSmartMoneyTopWallet[];
   smart_conviction: number;
+  yes_token_id: string | null;
+  no_token_id: string | null;
 };
+
+type BookLevel = { price: number; size: number; cum_usd: number };
+type BookEstimate = {
+  target_usd: number;
+  filled_usd: number;
+  filled_shares: number;
+  avg_price: number;
+  max_price: number;
+  fully_filled: boolean;
+};
+type BookPayload = {
+  token_id?: string;
+  bids: BookLevel[];
+  asks: BookLevel[];
+  best_bid: number | null;
+  best_ask: number | null;
+  midpoint?: number | null;
+  spread: number | null;
+  bid_depth_usd_top_n: number;
+  ask_depth_usd_top_n: number;
+  estimate?: BookEstimate;
+  error?: string;
+};
+type BookCacheEntry = { loading: boolean; data?: BookPayload; error?: string };
 
 type EventSmartMoneyDetail = {
   slug: string;
@@ -2454,6 +2480,135 @@ function formatCents(price: number | null | undefined): string {
   return `${cents.toFixed(1)}¢`;
 }
 
+function BookDepthPanel({
+  bookEntry,
+  sizeUsd,
+  onChangeSize,
+  onRefresh,
+}: {
+  bookEntry: BookCacheEntry | undefined;
+  sizeUsd: number;
+  onChangeSize: (n: number) => void;
+  onRefresh: () => void;
+}) {
+  if (!bookEntry || bookEntry.loading) {
+    return <div className="muted" style={{ padding: "0.5em" }}>Fetching live order book…</div>;
+  }
+  if (bookEntry.error) {
+    return <div className="banner error">Book error: {bookEntry.error}</div>;
+  }
+  const book = bookEntry.data;
+  if (!book) return null;
+  if (book.error) {
+    return <div className="banner error">Polymarket CLOB error: {book.error}</div>;
+  }
+  if (book.bids.length === 0 && book.asks.length === 0) {
+    return <div className="muted">No active book — this outcome may be resolved or untraded.</div>;
+  }
+  const est = book.estimate;
+  // Slippage % from best ask. Useful "how much does my buy move the price?" read.
+  const slippageBps = est && book.best_ask
+    ? ((est.avg_price - book.best_ask) / book.best_ask) * 10000
+    : 0;
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1em" }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75em", marginBottom: "0.5em", flexWrap: "wrap" }}>
+          <strong>Order book</strong>
+          <span className="muted" style={{ fontSize: "0.85em" }}>
+            best bid {book.best_bid != null ? formatCents(book.best_bid) : "—"}
+            {" · "}best ask {book.best_ask != null ? formatCents(book.best_ask) : "—"}
+            {book.spread != null ? ` · spread ${(book.spread * 100).toFixed(2)}¢` : ""}
+          </span>
+          <button type="button" className="refresh-button"
+                  style={{ padding: "0.15em 0.6em", fontSize: "0.85em" }}
+                  onClick={onRefresh}>
+            Refresh
+          </button>
+        </div>
+        <table style={{ width: "100%", fontSize: "0.9em" }}>
+          <thead>
+            <tr className="muted">
+              <th style={{ textAlign: "right" }}>Bid</th>
+              <th style={{ textAlign: "right" }}>Size</th>
+              <th style={{ textAlign: "right" }}>Cum $ (sell-out)</th>
+              <th style={{ width: "1em" }}></th>
+              <th style={{ textAlign: "right" }}>Ask</th>
+              <th style={{ textAlign: "right" }}>Size</th>
+              <th style={{ textAlign: "right" }}>Cum $ (buy-in)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: Math.max(book.bids.length, book.asks.length, 1) }).map((_, i) => {
+              const b = book.bids[i];
+              const a = book.asks[i];
+              return (
+                <tr key={i}>
+                  <td style={{ textAlign: "right", color: "var(--positive, #2a8a3e)" }}>
+                    {b ? formatCents(b.price) : ""}
+                  </td>
+                  <td style={{ textAlign: "right" }}>{b ? b.size.toFixed(0) : ""}</td>
+                  <td style={{ textAlign: "right" }}>{b ? `$${b.cum_usd.toFixed(0)}` : ""}</td>
+                  <td></td>
+                  <td style={{ textAlign: "right", color: "var(--negative, #c0392b)" }}>
+                    {a ? formatCents(a.price) : ""}
+                  </td>
+                  <td style={{ textAlign: "right" }}>{a ? a.size.toFixed(0) : ""}</td>
+                  <td style={{ textAlign: "right" }}>{a ? `$${a.cum_usd.toFixed(0)}` : ""}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5em", marginBottom: "0.5em", flexWrap: "wrap" }}>
+          <strong>Mirror sizing</strong>
+          <label style={{ fontSize: "0.85em", display: "flex", alignItems: "center", gap: "0.4em" }}>
+            Buy $
+            <input
+              type="number"
+              value={sizeUsd}
+              min={1}
+              step={10}
+              style={{ width: "5em" }}
+              onChange={(e) => onChangeSize(Number(e.target.value) || 0)}
+            />
+            of YES
+          </label>
+        </div>
+        {est && est.fully_filled ? (
+          <div style={{ padding: "0.5em 0", fontSize: "0.95em" }}>
+            <div>
+              Buys at avg <strong>{formatCents(est.avg_price)}</strong>, worst fill {formatCents(est.max_price)} →
+              <strong> {est.filled_shares.toFixed(1)} shares</strong>
+            </div>
+            <div className="muted" style={{ fontSize: "0.85em" }}>
+              Slippage vs best ask: <strong>{slippageBps >= 0 ? "+" : ""}{slippageBps.toFixed(0)} bps</strong>
+              {" · "}If outcome wins → payout ${est.filled_shares.toFixed(0)} ({(est.filled_shares / Math.max(est.filled_usd, 0.01)).toFixed(2)}× cost)
+            </div>
+            <div style={{ fontSize: "0.85em", marginTop: "0.5em" }}>
+              <span style={{ color: slippageBps < 50 ? "var(--positive, #2a8a3e)" : slippageBps < 200 ? "var(--muted)" : "var(--negative, #c0392b)" }}>
+                {slippageBps < 50 ? "✓ Negligible slippage — safe size" : slippageBps < 200 ? "⚠ Mild slippage — acceptable" : "✗ Book too thin for this size — reduce"}
+              </span>
+            </div>
+          </div>
+        ) : est ? (
+          <div className="banner error" style={{ marginTop: "0.5em" }}>
+            Book exhausts before filling ${sizeUsd}. Only ${est.filled_usd.toFixed(0)} fillable
+            ({est.filled_shares.toFixed(1)} shares at avg {formatCents(est.avg_price)}).
+            <span className="muted"> Reduce size or accept partial fill.</span>
+          </div>
+        ) : null}
+        <div className="muted" style={{ fontSize: "0.8em", marginTop: "0.75em" }}>
+          Ask depth shown: <strong>${book.ask_depth_usd_top_n.toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong> in top-10 levels.
+          {" "}A safe mirror is roughly ≤5% of that without moving the price.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EventSmartMoneyPage() {
   const [archive, setArchive] = useState<EventSnapshotArchive | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
@@ -2583,6 +2738,50 @@ function EventSmartMoneyPage() {
         return {};
     }
   };
+
+  // Per-outcome book-depth lookup. One outcome expanded at a time.
+  const [expandedTokenId, setExpandedTokenId] = useState<string | null>(null);
+  const [bookSizeUsd, setBookSizeUsd] = useState<number>(50);
+  const [bookCache, setBookCache] = useState<Record<string, BookCacheEntry>>({});
+
+  const loadBook = async (tokenId: string, sizeUsd: number) => {
+    const key = `${tokenId}|${sizeUsd}`;
+    setBookCache((prev) => ({ ...prev, [key]: { loading: true } }));
+    try {
+      const data = await fetchJson<BookPayload>(
+        `/api/event-smart-money-book/${encodeURIComponent(tokenId)}?target_usd=${sizeUsd}`,
+      );
+      setBookCache((prev) => ({ ...prev, [key]: { loading: false, data } }));
+    } catch (exc) {
+      setBookCache((prev) => ({
+        ...prev,
+        [key]: { loading: false, error: exc instanceof Error ? exc.message : String(exc) },
+      }));
+    }
+  };
+
+  const toggleBook = (tokenId: string | null) => {
+    if (!tokenId) return;
+    if (expandedTokenId === tokenId) {
+      setExpandedTokenId(null);
+      return;
+    }
+    setExpandedTokenId(tokenId);
+    const key = `${tokenId}|${bookSizeUsd}`;
+    if (!bookCache[key]) {
+      void loadBook(tokenId, bookSizeUsd);
+    }
+  };
+
+  // Re-fetch the expanded row when the size knob changes.
+  useEffect(() => {
+    if (!expandedTokenId) return;
+    const key = `${expandedTokenId}|${bookSizeUsd}`;
+    if (!bookCache[key]) {
+      void loadBook(expandedTokenId, bookSizeUsd);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedTokenId, bookSizeUsd]);
 
   // Per-outcome "penny opportunity" tier for the detail panel. Different
   // thresholds than the top-1 watchlist tiering — for individual outcomes
@@ -2944,45 +3143,79 @@ function EventSmartMoneyPage() {
                             </th>
                             <th style={{ textAlign: "right" }}>Total PnL</th>
                             <th style={{ textAlign: "right" }}>Conviction</th>
+                            <th style={{ textAlign: "center" }} title="Order-book depth check before mirroring">Book</th>
                           </tr>
                         </thead>
                         <tbody>
                           {visibleRows.map((sig, idx) => {
                             const tier = outcomeTier(sig);
                             const payoffMult = sig.current_yes_price > 0 ? 1.0 / sig.current_yes_price : 0;
+                            const tokenId = sig.yes_token_id;
+                            const expanded = expandedTokenId !== null && expandedTokenId === tokenId;
+                            const bookKey = tokenId ? `${tokenId}|${bookSizeUsd}` : "";
+                            const bookEntry = bookKey ? bookCache[bookKey] : undefined;
                             return (
-                              <tr key={sig.condition_id || sig.outcome} style={outcomeTierStyle(tier)}
-                                  title={
-                                    tier === "green" ? "Penny opportunity: cheap entry + real smart money + signal still healthy"
-                                    : tier === "yellow" ? "Borderline penny setup (priced-up or thinner)"
-                                    : tier === "red" ? "Dead outcome (eliminated or already resolved)"
-                                    : "Insufficient signal"
-                                  }>
-                                <td>{detail.ranked_outcomes.indexOf(sig) + 1}</td>
-                                <td>
-                                  <strong>{sig.outcome}</strong>
-                                </td>
-                                <td style={{ textAlign: "right" }}>{formatCents(sig.current_yes_price)}</td>
-                                <td style={{ textAlign: "right" }}>{sig.yes_holders_count}</td>
-                                <td style={{ textAlign: "right" }}>{formatCents(sig.yes_avg_price)}</td>
-                                <td style={{ textAlign: "right" }}>
-                                  ${sig.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                </td>
-                                <td style={{ textAlign: "right" }}>
-                                  {payoffMult >= 100 ? "—" : `${payoffMult.toFixed(1)}×`}
-                                </td>
-                                <td style={{ textAlign: "right", color: sig.yes_total_pnl >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)" }}>
-                                  {sig.yes_total_pnl >= 0 ? "+" : ""}${sig.yes_total_pnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                </td>
-                                <td style={{ textAlign: "right" }}>
-                                  {sig.smart_conviction.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                </td>
-                              </tr>
+                              <Fragment key={sig.condition_id || sig.outcome}>
+                                <tr style={outcomeTierStyle(tier)}
+                                    title={
+                                      tier === "green" ? "Penny opportunity: cheap entry + real smart money + signal still healthy"
+                                      : tier === "yellow" ? "Borderline penny setup (priced-up or thinner)"
+                                      : tier === "red" ? "Dead outcome (eliminated or already resolved)"
+                                      : "Insufficient signal"
+                                    }>
+                                  <td>{detail.ranked_outcomes.indexOf(sig) + 1}</td>
+                                  <td>
+                                    <strong>{sig.outcome}</strong>
+                                  </td>
+                                  <td style={{ textAlign: "right" }}>{formatCents(sig.current_yes_price)}</td>
+                                  <td style={{ textAlign: "right" }}>{sig.yes_holders_count}</td>
+                                  <td style={{ textAlign: "right" }}>{formatCents(sig.yes_avg_price)}</td>
+                                  <td style={{ textAlign: "right" }}>
+                                    ${sig.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                  </td>
+                                  <td style={{ textAlign: "right" }}>
+                                    {payoffMult >= 100 ? "—" : `${payoffMult.toFixed(1)}×`}
+                                  </td>
+                                  <td style={{ textAlign: "right", color: sig.yes_total_pnl >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)" }}>
+                                    {sig.yes_total_pnl >= 0 ? "+" : ""}${sig.yes_total_pnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                  </td>
+                                  <td style={{ textAlign: "right" }}>
+                                    {sig.smart_conviction.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                  </td>
+                                  <td style={{ textAlign: "center" }}>
+                                    {tokenId ? (
+                                      <button
+                                        type="button"
+                                        className="refresh-button"
+                                        style={{ padding: "0.15em 0.6em", fontSize: "0.85em" }}
+                                        onClick={() => toggleBook(tokenId)}
+                                        title="Show order-book depth"
+                                      >
+                                        {expanded ? "▾ Hide" : "▸ Show"}
+                                      </button>
+                                    ) : (
+                                      <span className="muted">—</span>
+                                    )}
+                                  </td>
+                                </tr>
+                                {expanded && tokenId && (
+                                  <tr style={{ backgroundColor: "rgba(255,255,255,0.02)" }}>
+                                    <td colSpan={10} style={{ padding: "0.75em 1em" }}>
+                                      <BookDepthPanel
+                                        bookEntry={bookEntry}
+                                        sizeUsd={bookSizeUsd}
+                                        onChangeSize={setBookSizeUsd}
+                                        onRefresh={() => void loadBook(tokenId, bookSizeUsd)}
+                                      />
+                                    </td>
+                                  </tr>
+                                )}
+                              </Fragment>
                             );
                           })}
                           {visibleRows.length === 0 && (
                             <tr>
-                              <td colSpan={9} className="muted" style={{ textAlign: "center", padding: "1em" }}>
+                              <td colSpan={10} className="muted" style={{ textAlign: "center", padding: "1em" }}>
                                 No penny opportunities at the current filters. Try lowering Min position $ or unchecking the filter.
                               </td>
                             </tr>
