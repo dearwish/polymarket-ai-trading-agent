@@ -2502,7 +2502,57 @@ function EventSmartMoneyPage() {
     void loadDetail(slug);
   };
 
-  const snapshots = archive?.snapshots ?? [];
+  type SortKey = "end_date" | "avg_paid" | "invested" | "current_yes" | "conviction";
+  const [sortKey, setSortKey] = useState<SortKey>("end_date");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const onSortClick = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      // Sensible default direction per column: descending for numbers (biggest
+      // conviction / dollars / YES first), ascending for end_date so it
+      // matches the original "closest to resolution first" feel.
+      setSortDir(key === "end_date" ? "asc" : "desc");
+    }
+  };
+
+  const sortIcon = (key: SortKey) => {
+    if (sortKey !== key) {
+      return <span className="muted" style={{ marginLeft: "0.25em", opacity: 0.45 }}>↕</span>;
+    }
+    return <span style={{ marginLeft: "0.25em" }}>{sortDir === "asc" ? "↑" : "↓"}</span>;
+  };
+
+  const snapshots = useMemo(() => {
+    const rows = archive?.snapshots ?? [];
+    const dir = sortDir === "asc" ? 1 : -1;
+    const pickVal = (r: EventSnapshotRow): number | string => {
+      const top = r.top10?.[0];
+      switch (sortKey) {
+        case "end_date":
+          return r.end_date || "";
+        case "avg_paid":
+          return top?.yes_avg_price ?? -Infinity;
+        case "invested":
+          return top?.yes_total_size_usd ?? -Infinity;
+        case "current_yes":
+          return top?.current_yes_price ?? -Infinity;
+        case "conviction":
+          return top?.conviction ?? -Infinity;
+        default:
+          return 0;
+      }
+    };
+    return [...rows].sort((a, b) => {
+      const va = pickVal(a);
+      const vb = pickVal(b);
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+  }, [archive, sortKey, sortDir]);
 
   return (
     <section className="page-section">
@@ -2588,10 +2638,30 @@ function EventSmartMoneyPage() {
                   <th>End date</th>
                   <th>Event</th>
                   <th>Top-1 pick</th>
-                  <th style={{ textAlign: "right" }}>Avg paid</th>
-                  <th style={{ textAlign: "right" }}>Invested $</th>
-                  <th style={{ textAlign: "right" }}>Current YES</th>
-                  <th style={{ textAlign: "right" }}>Conviction</th>
+                  <th
+                    style={{ textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                    onClick={() => onSortClick("avg_paid")}
+                  >
+                    Avg paid{sortIcon("avg_paid")}
+                  </th>
+                  <th
+                    style={{ textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                    onClick={() => onSortClick("invested")}
+                  >
+                    Invested ${sortIcon("invested")}
+                  </th>
+                  <th
+                    style={{ textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                    onClick={() => onSortClick("current_yes")}
+                  >
+                    Current YES{sortIcon("current_yes")}
+                  </th>
+                  <th
+                    style={{ textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                    onClick={() => onSortClick("conviction")}
+                  >
+                    Conviction{sortIcon("conviction")}
+                  </th>
                   <th>Snapshot</th>
                 </tr>
               </thead>
