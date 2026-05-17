@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "event-signals" | "settings" | "daemon";
 
@@ -2525,6 +2525,55 @@ function EventSmartMoneyPage() {
     return <span style={{ marginLeft: "0.25em" }}>{sortDir === "asc" ? "↑" : "↓"}</span>;
   };
 
+  // Opportunity tier shading. Past events are GREY (no longer actionable).
+  // For future events:
+  //   GREEN  = best coming opportunities (cheap entry, real conviction, room to run)
+  //   YELLOW = decent setups (real money but already partially priced or thinner)
+  //   RED    = poor / dead signals (smart money lost, or near full resolution)
+  type OppTier = "past" | "green" | "yellow" | "red" | "none";
+  const NOW_MS = Date.now();
+  const tierOf = (row: EventSnapshotRow): OppTier => {
+    const end = row.end_date ? Date.parse(row.end_date) : NaN;
+    if (Number.isFinite(end) && end < NOW_MS) return "past";
+    const top = row.top10?.[0];
+    if (!top) return "none";
+    const cy = top.current_yes_price;
+    const avg = top.yes_avg_price;
+    const inv = top.yes_total_size_usd;
+    const holders = top.yes_holders_count;
+    // Dead signals first.
+    if (cy <= 0.02) return "red";              // smart money lost
+    if (cy >= 0.97) return "red";              // already fully resolved, no upside
+    if (holders < 5) return "red";             // thin signal
+    if (inv < 25_000) return "red";            // too little real money
+    // Green: meaningful money, market hasn't fully rerated (room to grow),
+    // and entry price wasn't a lottery ticket nor already expensive.
+    const roomToResolve = 1.0 - cy;
+    if (
+      inv >= 100_000 &&
+      holders >= 10 &&
+      avg >= 0.05 && avg <= 0.50 &&
+      roomToResolve >= 0.25 &&
+      cy >= avg * 0.8   // market hasn't fully puked on the position
+    ) return "green";
+    return "yellow";
+  };
+
+  const tierStyle = (tier: OppTier): CSSProperties => {
+    switch (tier) {
+      case "past":
+        return { opacity: 0.45, backgroundColor: "rgba(128,128,128,0.05)" };
+      case "green":
+        return { boxShadow: "inset 4px 0 0 0 #2a8a3e", backgroundColor: "rgba(42,138,62,0.06)" };
+      case "yellow":
+        return { boxShadow: "inset 4px 0 0 0 #c69026", backgroundColor: "rgba(198,144,38,0.05)" };
+      case "red":
+        return { boxShadow: "inset 4px 0 0 0 #c0392b", backgroundColor: "rgba(192,57,43,0.04)" };
+      default:
+        return {};
+    }
+  };
+
   const snapshots = useMemo(() => {
     const rows = archive?.snapshots ?? [];
     const dir = sortDir === "asc" ? 1 : -1;
@@ -2621,6 +2670,20 @@ function EventSmartMoneyPage() {
             </span>
           )}
         </header>
+        <div className="muted" style={{ fontSize: "0.85em", marginBottom: "0.75em", display: "flex", gap: "1em", flexWrap: "wrap" }}>
+          <span style={{ borderLeft: "4px solid #2a8a3e", paddingLeft: "0.5em" }}>
+            <strong>Green</strong> — best coming opportunity (≥$100K invested, ≥10 holders, 5–50¢ entry, room to resolve)
+          </span>
+          <span style={{ borderLeft: "4px solid #c69026", paddingLeft: "0.5em" }}>
+            <strong>Yellow</strong> — decent setup (real money but already priced or thinner)
+          </span>
+          <span style={{ borderLeft: "4px solid #c0392b", paddingLeft: "0.5em" }}>
+            <strong>Red</strong> — dead signal (smart money lost, near-resolved, or thin holders)
+          </span>
+          <span style={{ opacity: 0.55 }}>
+            <strong>Grey</strong> — event already ended (past)
+          </span>
+        </div>
         {archiveError && <div className="banner error">{archiveError}</div>}
         {archiveLoading && <div className="muted">Loading watchlist…</div>}
         {!archiveLoading && snapshots.length === 0 && !archiveError && (
@@ -2662,6 +2725,7 @@ function EventSmartMoneyPage() {
                   >
                     Conviction{sortIcon("conviction")}
                   </th>
+                  <th style={{ textAlign: "right" }}>Holders</th>
                   <th>Snapshot</th>
                 </tr>
               </thead>
@@ -2670,16 +2734,37 @@ function EventSmartMoneyPage() {
                   const top = row.top10?.[0];
                   const isSelected = selectedSlug === row.slug;
                   const pickName = top ? (top.country ?? top.outcome ?? "—") : "—";
+                  const tier = tierOf(row);
+                  const rowStyle: CSSProperties = {
+                    cursor: "pointer",
+                    ...tierStyle(tier),
+                  };
+                  const polyUrl = `https://polymarket.com/event/${encodeURIComponent(row.slug)}`;
                   return (
                     <tr
                       key={row.slug}
                       className={isSelected ? "selected-row" : ""}
-                      style={{ cursor: "pointer" }}
+                      style={rowStyle}
                       onClick={() => void loadDetail(row.slug)}
+                      title={
+                        tier === "past" ? "Event ended — past opportunity (greyed)"
+                        : tier === "green" ? "Best coming opportunity (real conviction, market hasn't fully rerated)"
+                        : tier === "yellow" ? "Decent setup (partial conviction or already priced)"
+                        : tier === "red" ? "Poor / dead signal (smart money lost, near-resolved, or thin)"
+                        : "Insufficient signal"
+                      }
                     >
                       <td>{(row.end_date ?? "").slice(0, 10) || "—"}</td>
                       <td>
-                        <div>{row.title}</div>
+                        <a
+                          href={polyUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ color: "inherit", textDecoration: "underline" }}
+                        >
+                          {row.title}
+                        </a>
                         <div className="muted" style={{ fontSize: "0.85em" }}>{row.slug}</div>
                       </td>
                       <td>{pickName}</td>
@@ -2694,6 +2779,9 @@ function EventSmartMoneyPage() {
                       </td>
                       <td style={{ textAlign: "right" }}>
                         {top ? top.conviction.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—"}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        {top ? top.yes_holders_count : "—"}
                       </td>
                       <td className="muted">{row.snapshot_date}</td>
                     </tr>
