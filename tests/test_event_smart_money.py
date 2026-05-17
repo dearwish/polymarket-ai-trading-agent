@@ -25,8 +25,28 @@ from polymarket_trading_engine.engine import event_smart_money as esm
 # score_outcome — pure-function tests
 # ---------------------------------------------------------------------------
 
-def _holder(*, wallet="0xabc", name="", size=1.0, current_value=1.0,
-            avg_price=0.05, total_bought=100.0, realized=0.0, oi=0):
+def _holder(*, wallet="0xabc", name="", size=None, current_value=None,
+            avg_price=0.05, total_bought=100.0, current_cost=None,
+            realized=0.0, oi=0):
+    """Build a synthetic market-positions holder dict.
+
+    ``current_cost`` lets a test express the wallet's CURRENT at-risk
+    capital directly; it's auto-derived as size × avg_price if omitted.
+    Defaults: holder is fully HODL'ing (size × avg_price == total_bought
+    means no exits, exit_rate = 0).
+    """
+    if current_cost is None and size is None:
+        # Default: assume HODL — current cost equals lifetime buying.
+        size = total_bought / avg_price if avg_price > 0 else 0.0
+        current_cost = total_bought
+    elif current_cost is None and size is not None:
+        current_cost = size * avg_price
+    elif size is None:
+        size = current_cost / avg_price if avg_price > 0 else 0.0
+    if current_value is None:
+        # By default, mark-to-market at avg_price → no price movement,
+        # exit_rate = 0 when size×avg == totalBought.
+        current_value = current_cost
     return {
         "proxyWallet": wallet,
         "name": name,
@@ -43,16 +63,48 @@ def _holder(*, wallet="0xabc", name="", size=1.0, current_value=1.0,
     }
 
 
-def test_conviction_is_invested_times_avg_paid() -> None:
+def test_conviction_is_current_at_risk_times_avg_paid() -> None:
+    """Conviction = (size × avgPrice) × avgPrice — current at-risk capital
+    weighted by the avg paid by smart money. HODL case: size×avg ==
+    totalBought, so conviction matches the old totalBought × avgPrice."""
     holders = [_holder(total_bought=10_000, avg_price=0.10)]
     sig = esm.score_outcome(
         "Bulgaria", "cid", yes_price=0.30, no_price=0.70, closed=False,
         yes_holders=holders, no_holders=[],
         min_position_usd=1000, min_avg_price=0.01,
     )
-    # 10,000 × 0.10 = 1,000
+    # size = 10k/0.10 = 100,000 shares; current_cost = 10,000
+    # conviction = 10,000 × 0.10 = 1,000
     assert sig.smart_conviction == pytest.approx(1000.0)
+    assert sig.yes_total_size_usd == pytest.approx(10_000.0)
     assert sig.yes_holders_count == 1
+    assert sig.yes_exit_rate == pytest.approx(0.0)  # HODL
+
+
+def test_conviction_discounts_wallets_who_scaled_out() -> None:
+    """The peepeepooppoop case: wallet bought $26.7K, currently holds
+    8,284 shares at avg 27.1¢ = $2,244 still at risk, realized +$1,423
+    on the sold portion. Conviction should reflect $2.2K not $26.7K."""
+    h = _holder(
+        total_bought=26_714,
+        size=8_284,
+        avg_price=0.271,
+        current_value=8_284 * 0.225,  # current price 22.5¢
+        realized=1_423,
+    )
+    sig = esm.score_outcome(
+        "Spencer Pratt", "cid", 0.225, 0.775, False, [h], [],
+        min_position_usd=1000, min_avg_price=0.01,
+    )
+    # Current at-risk: 8,284 × 0.271 = $2,244
+    assert sig.yes_total_size_usd == pytest.approx(8_284 * 0.271, rel=0.01)
+    # Conviction much smaller than the old totalBought-based score of
+    # 26_714 × 0.271 = 7,242 — discounts by the exit ratio.
+    assert sig.smart_conviction < 26_714 * 0.271 * 0.5  # <50% of old score
+    # Exit rate: (totalBought - currentValue) / totalBought
+    expected_exit = (26_714 - 8_284 * 0.225) / 26_714
+    assert sig.yes_exit_rate == pytest.approx(expected_exit, rel=0.01)
+    assert sig.yes_total_bought_usd == pytest.approx(26_714.0)
 
 
 def test_lottery_filter_drops_subcent_buys() -> None:
@@ -65,6 +117,7 @@ def test_lottery_filter_drops_subcent_buys() -> None:
         min_position_usd=1000, min_avg_price=0.01,
     )
     assert sig.yes_holders_count == 1
+    # Default _holder is HODL → size × avg_price == total_bought.
     assert sig.yes_total_size_usd == pytest.approx(5000.0)
     assert sig.yes_avg_price == pytest.approx(0.08)
 
@@ -83,17 +136,21 @@ def test_min_position_filter_drops_dust_wallets() -> None:
 
 
 def test_volume_weighted_avg_price() -> None:
+    """Avg paid is weighted by shares currently held — for HODL wallets
+    where size × avgPrice equals totalBought, this gives the same answer
+    as the old totalBought-weighted formula."""
     holders = [
-        _holder(wallet="0xa", total_bought=10_000, avg_price=0.10),
-        _holder(wallet="0xb", total_bought=30_000, avg_price=0.20),
+        _holder(wallet="0xa", total_bought=10_000, avg_price=0.10),  # 100k shares
+        _holder(wallet="0xb", total_bought=30_000, avg_price=0.20),  # 150k shares
     ]
     sig = esm.score_outcome(
         "X", "cid", 0.5, 0.5, False, holders, [],
         min_position_usd=1000, min_avg_price=0.01,
     )
-    # (10k × 0.10 + 30k × 0.20) / 40k = 0.175
-    assert sig.yes_avg_price == pytest.approx(0.175)
-    assert sig.smart_conviction == pytest.approx(40_000 * 0.175)
+    # Weighted by shares: (100k × 0.10 + 150k × 0.20) / 250k = 0.16
+    assert sig.yes_avg_price == pytest.approx(0.16)
+    # Conviction = current_cost × avg_paid = 40_000 × 0.16
+    assert sig.smart_conviction == pytest.approx(40_000 * 0.16)
 
 
 def test_no_holders_zero_conviction() -> None:

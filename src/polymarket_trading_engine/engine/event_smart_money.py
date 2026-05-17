@@ -53,12 +53,26 @@ class OutcomeSignal:
     current_no_price: float
     closed: bool
     yes_holders_count: int = 0
+    # Current at-risk $ committed by filtered holders, valued at the
+    # avg price they paid for shares STILL held (i.e. size × avgPrice).
+    # Replaces the prior "sum of totalBought" semantics, which overstated
+    # commitment by including cumulative buying from shares the wallet has
+    # since sold. The conviction score and the "Invested $" column on the
+    # dashboard now reflect current commitment, not lifetime accumulation.
     yes_total_size_usd: float = 0.0
+    # Lifetime cumulative buying ($) across the same filtered holders.
+    # Kept around to compute exit_rate (how much of the early conviction
+    # has already been taken off the table) and to surface it on the UI.
+    yes_total_bought_usd: float = 0.0
     yes_total_shares: float = 0.0
     yes_total_realized_pnl: float = 0.0
     yes_total_current_value: float = 0.0
     yes_total_pnl: float = 0.0
     yes_avg_price: float = 0.0
+    # 0–1 fraction of cumulative buying that's no longer in the position.
+    # (totalBought - currentValue) / totalBought. High = smart money has
+    # already scaled out, conviction signal is partly stale.
+    yes_exit_rate: float = 0.0
     yes_top_wallets: list[dict] = field(default_factory=list)
     no_holders_count: int = 0
     no_total_size_usd: float = 0.0
@@ -80,8 +94,10 @@ class OutcomeSignal:
             "closed": self.closed,
             "yes_holders_count": self.yes_holders_count,
             "yes_total_size_usd": self.yes_total_size_usd,
+            "yes_total_bought_usd": self.yes_total_bought_usd,
             "yes_total_pnl": self.yes_total_pnl,
             "yes_avg_price": self.yes_avg_price,
+            "yes_exit_rate": self.yes_exit_rate,
             "yes_top_wallets": self.yes_top_wallets,
             "smart_conviction": self.smart_conviction,
             "yes_token_id": self.yes_token_id,
@@ -287,6 +303,9 @@ def score_outcome(
         current_no_price=no_price,
         closed=closed,
     )
+    # Filter on the LIFETIME-bought threshold (so we don't drop holders
+    # who scaled out — they were real smart money at one point and
+    # their absence from current holdings is itself information).
     yes_filtered = [
         p for p in yes_holders
         if float(p.get("totalBought") or 0) >= min_position_usd
@@ -295,23 +314,53 @@ def score_outcome(
     if yes_filtered:
         sig.yes_holders_count = len(yes_filtered)
         for p in yes_filtered:
-            sig.yes_total_size_usd += float(p.get("totalBought") or 0)
-            sig.yes_total_shares += float(p.get("size") or 0)
+            size = float(p.get("size") or 0)
+            avg = float(p.get("avgPrice") or 0)
+            # Current at-risk capital per holder = shares still held × the
+            # avg price they paid for THOSE shares. (avgPrice on the
+            # market-positions endpoint is the avg of currently-held
+            # shares, not lifetime — verified against peepeepooppoop case
+            # where size×avg ≈ $2.2K while totalBought = $26.7K.)
+            sig.yes_total_size_usd += size * avg
+            sig.yes_total_bought_usd += float(p.get("totalBought") or 0)
+            sig.yes_total_shares += size
             sig.yes_total_realized_pnl += float(p.get("realizedPnl") or 0)
             sig.yes_total_current_value += float(p.get("currentValue") or 0)
             sig.yes_total_pnl += float(p.get("totalPnl") or 0)
-        weighted = sum(
-            float(p.get("avgPrice") or 0) * float(p.get("totalBought") or 0)
-            for p in yes_filtered
+        # avg paid weighted by shares currently held — what the typical
+        # remaining share cost. Volume-weighted by share count is equivalent
+        # to dollar-weighted by current-cost since cost = shares × avgPrice.
+        if sig.yes_total_shares > 0:
+            sig.yes_avg_price = sum(
+                float(p.get("avgPrice") or 0) * float(p.get("size") or 0)
+                for p in yes_filtered
+            ) / sig.yes_total_shares
+        # Exit rate: fraction of cumulative buying that's no longer in
+        # the position. High → smart money has already taken profit and
+        # the live conviction signal is partly stale.
+        if sig.yes_total_bought_usd > 0:
+            sig.yes_exit_rate = max(
+                0.0,
+                (sig.yes_total_bought_usd - sig.yes_total_current_value) / sig.yes_total_bought_usd,
+            )
+        # Rank top wallets by CURRENT exposure ($-at-risk), not lifetime
+        # buying — a wallet still holding $20K is a stronger signal than
+        # a wallet that bought $50K and exited 95% of it.
+        yes_filtered.sort(
+            key=lambda p: -(float(p.get("size") or 0) * float(p.get("avgPrice") or 0))
         )
-        sig.yes_avg_price = weighted / sig.yes_total_size_usd if sig.yes_total_size_usd > 0 else 0.0
-        yes_filtered.sort(key=lambda p: -float(p.get("totalBought") or 0))
         for p in yes_filtered[:5]:
+            size = float(p.get("size") or 0)
+            avg = float(p.get("avgPrice") or 0)
+            bought = float(p.get("totalBought") or 0)
+            current_cost = size * avg
             sig.yes_top_wallets.append({
                 "wallet": str(p.get("proxyWallet") or ""),
                 "name": str(p.get("name") or ""),
-                "avg_price": float(p.get("avgPrice") or 0),
-                "bought_usd": float(p.get("totalBought") or 0),
+                "avg_price": avg,
+                "bought_usd": bought,          # cumulative — preserved for UI
+                "current_cost_usd": current_cost,  # NEW: still at-risk
+                "exit_rate": max(0.0, (bought - float(p.get("currentValue") or 0)) / bought) if bought > 0 else 0.0,
             })
         sig.smart_conviction = sig.yes_total_size_usd * sig.yes_avg_price
 
@@ -322,12 +371,17 @@ def score_outcome(
     ]
     if no_filtered:
         sig.no_holders_count = len(no_filtered)
-        sig.no_total_size_usd = sum(float(p.get("totalBought") or 0) for p in no_filtered)
-        weighted = sum(
-            float(p.get("avgPrice") or 0) * float(p.get("totalBought") or 0)
+        # Same current-at-risk semantics on the NO side.
+        no_shares = sum(float(p.get("size") or 0) for p in no_filtered)
+        sig.no_total_size_usd = sum(
+            float(p.get("size") or 0) * float(p.get("avgPrice") or 0)
             for p in no_filtered
         )
-        sig.no_avg_price = weighted / sig.no_total_size_usd if sig.no_total_size_usd > 0 else 0.0
+        if no_shares > 0:
+            sig.no_avg_price = sum(
+                float(p.get("avgPrice") or 0) * float(p.get("size") or 0)
+                for p in no_filtered
+            ) / no_shares
     return sig
 
 

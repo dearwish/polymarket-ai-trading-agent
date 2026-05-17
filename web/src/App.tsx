@@ -69,6 +69,8 @@ type EventSmartMoneyTopWallet = {
   name: string;
   avg_price: number;
   bought_usd: number;
+  current_cost_usd?: number;
+  exit_rate?: number;
 };
 
 type EventSmartMoneyRanked = {
@@ -78,9 +80,11 @@ type EventSmartMoneyRanked = {
   current_no_price: number;
   closed: boolean;
   yes_holders_count: number;
-  yes_total_size_usd: number;
+  yes_total_size_usd: number;        // current $ at risk (size × avgPrice)
+  yes_total_bought_usd?: number;      // cumulative lifetime $ bought
   yes_total_pnl: number;
   yes_avg_price: number;
+  yes_exit_rate?: number;             // 0..1 fraction of cumulative buying that's exited
   yes_top_wallets: EventSmartMoneyTopWallet[];
   smart_conviction: number;
   yes_token_id: string | null;
@@ -3258,7 +3262,8 @@ function EventSmartMoneyPage() {
                             <th style={{ textAlign: "right" }}>Current YES</th>
                             <th style={{ textAlign: "right" }}>Holders</th>
                             <th style={{ textAlign: "right" }}>Avg paid</th>
-                            <th style={{ textAlign: "right" }}>Invested $</th>
+                            <th style={{ textAlign: "right" }} title="Current $ committed by smart money — shares still held × avg price they paid. Replaces the old totalBought figure which inflated conviction with capital that's since been sold.">$ at risk</th>
+                            <th style={{ textAlign: "right" }} title="Fraction of cumulative smart-money buying that's no longer in the position. High exit rate = signal is stale (smart money took profit and left).">Exit %</th>
                             <th style={{ textAlign: "right" }} title="If this outcome wins, payoff multiple = $1 / current YES. Higher = more asymmetric.">
                               Payoff×
                             </th>
@@ -3293,6 +3298,29 @@ function EventSmartMoneyPage() {
                                   <td style={{ textAlign: "right" }}>{formatCents(sig.yes_avg_price)}</td>
                                   <td style={{ textAlign: "right" }}>
                                     ${sig.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                    {sig.yes_total_bought_usd != null && sig.yes_total_bought_usd > sig.yes_total_size_usd * 1.1 && (
+                                      <span className="muted" style={{ fontSize: "0.75em", marginLeft: "0.3em" }}
+                                            title={`Smart money cumulatively bought $${sig.yes_total_bought_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })} but currently holds only the $-at-risk shown`}>
+                                        (of ${(sig.yes_total_bought_usd / 1000).toFixed(0)}K)
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td style={{ textAlign: "right" }}>
+                                    {sig.yes_exit_rate != null && sig.yes_exit_rate > 0 ? (
+                                      <span style={{
+                                        color: sig.yes_exit_rate >= 0.8 ? "var(--negative, #c0392b)"
+                                          : sig.yes_exit_rate >= 0.5 ? "#c69026"
+                                          : "inherit"
+                                      }} title={
+                                        sig.yes_exit_rate >= 0.8
+                                          ? "Smart money has mostly exited — conviction signal is largely stale"
+                                          : sig.yes_exit_rate >= 0.5
+                                          ? "Smart money has scaled out materially — partial signal degradation"
+                                          : "Smart money still mostly holding"
+                                      }>
+                                        {(sig.yes_exit_rate * 100).toFixed(0)}%
+                                      </span>
+                                    ) : "—"}
                                   </td>
                                   <td style={{ textAlign: "right" }}>
                                     {payoffMult >= 100 ? "—" : `${payoffMult.toFixed(1)}×`}
@@ -3321,7 +3349,7 @@ function EventSmartMoneyPage() {
                                 </tr>
                                 {expanded && tokenId && (
                                   <tr style={{ backgroundColor: "rgba(255,255,255,0.02)" }}>
-                                    <td colSpan={10} style={{ padding: "0.75em 1em" }}>
+                                    <td colSpan={11} style={{ padding: "0.75em 1em" }}>
                                       <BookDepthPanel
                                         bookEntry={bookEntry}
                                         sizeUsd={bookSizeUsd}
@@ -3336,7 +3364,7 @@ function EventSmartMoneyPage() {
                           })}
                           {visibleRows.length === 0 && (
                             <tr>
-                              <td colSpan={10} className="muted" style={{ textAlign: "center", padding: "1em" }}>
+                              <td colSpan={11} className="muted" style={{ textAlign: "center", padding: "1em" }}>
                                 No penny opportunities at the current filters. Try lowering Min position $ or unchecking the filter.
                               </td>
                             </tr>
