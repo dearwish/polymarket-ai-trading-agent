@@ -24,9 +24,12 @@ type LivePosition = {
   icon: string;
 };
 
+type LiveConditionMeta = { option_title: string; event_title: string };
+
 type LivePositionsPayload = {
   wallet: string;
   positions: LivePosition[];
+  condition_meta?: Record<string, LiveConditionMeta>;
   summary: {
     count: number;
     total_cost_usd: number;
@@ -3547,10 +3550,15 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
               </thead>
               <tbody>
                 {openOrders.map((o) => {
-                  // Cross-reference asset_id to known positions for friendly titles.
+                  // Three-step enrichment lookup for orders:
+                  //   1. Held position with matching asset_id  → use its option_title + event_title
+                  //   2. condition_meta map (from /api/live/positions, covers any market
+                  //      in the same event as a held position)
+                  //   3. Last resort: truncated conditionId + token-id
                   const matchedPos = positions.find((p) => p.asset === o.asset_id);
-                  const friendlyTitle = matchedPos?.title;
-                  const friendlySide = matchedPos?.outcome;
+                  const cidMeta = o.market_id ? data?.condition_meta?.[o.market_id] : undefined;
+                  const optionTitle = matchedPos?.option_title || cidMeta?.option_title || "";
+                  const eventTitle = matchedPos?.event_title || cidMeta?.event_title || matchedPos?.title || "";
                   // created_at is a Unix epoch string from the CLOB.
                   let postedDisplay = "—";
                   if (o.created_at) {
@@ -3573,16 +3581,16 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
                         style={rowStyle}
                         title={partialFilled ? `Partially filled: ${filled.toFixed(2)} of ${size.toFixed(2)} shares (${pctFilled.toFixed(0)}%)` : undefined}>
                       <td>
-                        {friendlyTitle ? (
-                          <div>{friendlyTitle}</div>
+                        {optionTitle ? (
+                          <div style={{ fontWeight: 600 }}>{optionTitle}</div>
                         ) : (
                           <div className="muted" style={{ fontSize: "0.85em" }}>
                             <code>{(o.market_id ?? "").slice(0, 12)}…</code>
                           </div>
                         )}
-                        <div className="muted" style={{ fontSize: "0.8em" }}>
-                          {friendlySide ? `${friendlySide} · ` : ""}token <code>{(o.asset_id ?? "").slice(0, 10)}…</code>
-                        </div>
+                        {eventTitle && eventTitle !== optionTitle && (
+                          <div className="muted" style={{ fontSize: "0.85em" }}>{eventTitle}</div>
+                        )}
                       </td>
                       <td>
                         <span className={`pill ${o.side === "BUY" ? "positive" : "negative"}`}

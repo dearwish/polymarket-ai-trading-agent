@@ -655,9 +655,23 @@ def create_app(
                 closed_pnl = sum(float(p.get("realizedPnl") or 0) for p in closed_raw)
         except Exception:
             pass
+        # Expose the condition_id → option/event map so the frontend can
+        # also enrich CLOB orders that don't match any held position via
+        # asset_id (e.g. a working BUY on a market the operator hasn't
+        # entered yet). Gamma /events returns every market in the same
+        # event, so if the order is on the same underlying event as any
+        # held position the enrichment is already in this map for free.
+        condition_meta = {
+            cid: {
+                "option_title": option_title_by_cid.get(cid, ""),
+                "event_title": event_title_by_cid.get(cid, ""),
+            }
+            for cid in option_title_by_cid.keys() | event_title_by_cid.keys()
+        }
         return {
             "wallet": funder,
             "positions": positions,
+            "condition_meta": condition_meta,
             "summary": {
                 "count": len(positions),
                 "total_cost_usd": round(total_cost, 2),
