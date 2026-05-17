@@ -3321,8 +3321,13 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Show the spinner / loading message only on the FIRST fetch. Polling
+  // refreshes happen silently so the table doesn't flash every 30s.
+  const isFirstLoadRef = useRef(true);
   const refresh = async () => {
-    setLoading(true);
+    if (isFirstLoadRef.current) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const payload = await fetchJson<LivePositionsPayload>("/api/live/positions");
@@ -3331,11 +3336,26 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setLoading(false);
+      isFirstLoadRef.current = false;
     }
   };
 
+  // Initial fetch on mount.
   useEffect(() => {
     void refresh();
+  }, []);
+
+  // Lightweight polling so the page tracks fills + price moves while open.
+  // Orders already update via the existing /api/dashboard/stream SSE feed,
+  // but positions / summary / condition_meta only refresh here.
+  // 30 s is the sweet spot — fast enough to feel live during a partial-fill
+  // sequence, slow enough to not hammer data-api when the tab is idle.
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void refresh().then(() => setLastRefreshedAt(Date.now()));
+    }, 30_000);
+    return () => window.clearInterval(id);
   }, []);
 
   const summary = data?.summary;
@@ -3382,9 +3402,15 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
               )}
             </p>
           </div>
-          <button type="button" className="refresh-button" onClick={() => void refresh()}>
-            Refresh
-          </button>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.3em" }}>
+            <button type="button" className="refresh-button"
+                    onClick={() => void refresh().then(() => setLastRefreshedAt(Date.now()))}>
+              Refresh
+            </button>
+            <span className="muted" style={{ fontSize: "0.75em" }}>
+              auto every 30s · last {new Date(lastRefreshedAt).toLocaleTimeString()}
+            </span>
+          </div>
         </header>
 
         {error && <div className="banner error" style={{ marginTop: "1em" }}>{error}</div>}
