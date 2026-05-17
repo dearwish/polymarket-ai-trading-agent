@@ -2523,6 +2523,33 @@ function formatCents(price: number | null | undefined): string {
   return `${cents.toFixed(1)}¢`;
 }
 
+// Days-to-resolution helper. Returns:
+//   { days, label, tier }
+//   tier ∈ "past" | "today" | "soon" (< 7d) | "near" (< 30d) | "far"
+// "soon" is the threshold for the horizon-risk warning — the framework's
+// 96% backtest hit rate was on events with multiple weeks between snapshot
+// and resolution. Sub-week events have already absorbed most of the
+// smart-money signal into the live YES price, so the asymmetric edge is
+// largely gone even when the conviction tier looks green.
+type HorizonTier = "past" | "today" | "soon" | "near" | "far";
+function daysToResolution(endDate: string | null | undefined): { days: number; label: string; tier: HorizonTier } {
+  if (!endDate) return { days: NaN, label: "—", tier: "far" };
+  const ms = Date.parse(endDate);
+  if (!Number.isFinite(ms)) return { days: NaN, label: "—", tier: "far" };
+  const diff = ms - Date.now();
+  const days = diff / (1000 * 60 * 60 * 24);
+  if (days < -0.5) {
+    return { days, label: `ended ${Math.abs(Math.round(days))}d ago`, tier: "past" };
+  }
+  if (days < 1) {
+    const hours = Math.max(0, Math.round(diff / (1000 * 60 * 60)));
+    return { days, label: hours <= 1 ? "<1h left" : `${hours}h left`, tier: "today" };
+  }
+  if (days < 7) return { days, label: `${Math.round(days)}d left`, tier: "soon" };
+  if (days < 30) return { days, label: `${Math.round(days)}d left`, tier: "near" };
+  return { days, label: `${Math.round(days)}d left`, tier: "far" };
+}
+
 function BookDepthPanel({
   bookEntry,
   sizeUsd,
@@ -3008,6 +3035,9 @@ function EventSmartMoneyPage() {
           <span style={{ opacity: 0.55 }}>
             <strong>Grey</strong> — event already ended (past)
           </span>
+          <span style={{ color: "#c69026" }}>
+            <strong>⚠ Horizon</strong> — ≤7d to resolution: framework edge largely captured by market
+          </span>
         </div>
         {archiveError && <div className="banner error">{archiveError}</div>}
         {archiveLoading && <div className="muted">Loading watchlist…</div>}
@@ -3024,6 +3054,7 @@ function EventSmartMoneyPage() {
               <thead>
                 <tr>
                   <th>End date</th>
+                  <th>Horizon</th>
                   <th>Event</th>
                   <th>Top-1 pick</th>
                   <th
@@ -3081,6 +3112,26 @@ function EventSmartMoneyPage() {
                     >
                       <td>{(row.end_date ?? "").slice(0, 10) || "—"}</td>
                       <td>
+                        {(() => {
+                          const h = daysToResolution(row.end_date);
+                          const color = h.tier === "past" ? "var(--muted, #999)"
+                            : h.tier === "today" ? "var(--negative, #c0392b)"
+                            : h.tier === "soon" ? "#c69026"
+                            : h.tier === "near" ? "inherit"
+                            : "var(--muted, #999)";
+                          return (
+                            <span style={{ color, fontSize: "0.9em" }}
+                                  title={
+                                    h.tier === "today" || h.tier === "soon"
+                                      ? "Short-horizon event: smart-money signal is largely already priced in. The framework's 96% backtest was on multi-week events."
+                                      : undefined
+                                  }>
+                              {h.tier === "soon" || h.tier === "today" ? "⚠ " : ""}{h.label}
+                            </span>
+                          );
+                        })()}
+                      </td>
+                      <td>
                         <a
                           href={polyUrl}
                           target="_blank"
@@ -3125,9 +3176,36 @@ function EventSmartMoneyPage() {
             <span className="muted">
               slug=<code>{selectedSlug}</code>
               {detail?.end_date ? ` · end=${detail.end_date.slice(0, 10)}` : ""}
+              {detail?.end_date && (() => {
+                const h = daysToResolution(detail.end_date);
+                return h.tier !== "far" ? ` · ${h.label}` : "";
+              })()}
               {detail ? ` · ${detail.n_outcomes} outcomes` : ""}
             </span>
           </header>
+          {/* Horizon-risk warning for sub-week events. The framework's
+              backtest validated +154.9% ROI on multi-week events where
+              smart money positioned weeks before resolution. At ≤7 days,
+              the live YES price has absorbed the conviction signal and
+              the residual edge is small. ≤1 day is essentially gambling
+              on the leaderboard. */}
+          {detail?.end_date && (() => {
+            const h = daysToResolution(detail.end_date);
+            if (h.tier !== "soon" && h.tier !== "today") return null;
+            const isToday = h.tier === "today";
+            return (
+              <div className="banner" style={{
+                backgroundColor: isToday ? "rgba(192,57,43,0.12)" : "rgba(198,144,38,0.12)",
+                borderLeft: `4px solid ${isToday ? "#c0392b" : "#c69026"}`,
+                padding: "0.75em 1em",
+                marginBottom: "1em",
+              }}>
+                <strong>{isToday ? "⚠ Sub-day horizon" : "⚠ Sub-week horizon"}</strong>
+                {" — "}{h.label}. The framework's 96% backtest hit rate was on events resolving in 2–12 weeks, where smart money positioned before the market caught up. At this horizon the conviction signal is largely already priced into the live YES, so the asymmetric "ride to $1.00" edge is mostly captured.
+                {isToday && " Single-day variance is high; consider abstaining or sizing materially smaller."}
+              </div>
+            );
+          })()}
           {detailLoading && <div className="muted">Fetching live conviction signal (5–30s)…</div>}
           {detailError && <div className="banner error">{detailError}</div>}
           {detail && (
