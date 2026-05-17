@@ -20,6 +20,10 @@ from polymarket_trading_engine.config import (
     runtime_settings_payload,
     save_runtime_overrides,
 )
+from polymarket_trading_engine.engine.event_smart_money import (
+    EventNotFoundError,
+    analyze_event,
+)
 from polymarket_trading_engine.service import AgentService
 
 
@@ -695,6 +699,30 @@ def create_app(
                 await asyncio.sleep(interval_seconds)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    @app.get("/api/event-smart-money/{slug}")
+    def event_smart_money(
+        slug: str,
+        min_position_usd: float = Query(2000.0, ge=0),
+        min_avg_price: float = Query(0.01, ge=0, le=1),
+        top_holders: int = Query(30, ge=5, le=100),
+    ) -> dict:
+        """Smart-money conviction ranking for a multi-outcome Polymarket
+        event. Slow (5-30s) — pulls per-outcome holders from the
+        Polymarket data-api, so cache on the client side. Hits external
+        APIs only; no engine state read or write."""
+        cache_key = f"esm:{slug}:{min_position_usd}:{min_avg_price}:{top_holders}"
+        try:
+            return _cached(cache_key, 300.0, lambda: analyze_event(
+                slug,
+                min_position_usd=min_position_usd,
+                min_avg_price=min_avg_price,
+                top_holders=top_holders,
+            ))
+        except EventNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"upstream error: {exc}") from exc
 
     @app.get("/api/portfolio/summary")
     def portfolio_summary(service: AgentService = Depends(service_factory)) -> dict:

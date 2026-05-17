@@ -1,64 +1,103 @@
-# Cross-Event Validation — Smart-Money Top-1 Pick
+# Event Smart-Money Strategy — Validation Status
 
-**Date:** 2026-05-17
-**Script:** [`scripts/event_smart_money.py`](event_smart_money.py)
-**Filter:** `--min-position-usd 2000 --min-avg-price 0.01`
+**Last updated:** 2026-05-17
 
-## Results
+This file tracks the cumulative evidence for the event-smart-money
+strategy across the three validation tracks built in `scripts/`:
 
-| Event | Top-1 by conviction | Avg paid | Invested $ | Current YES | Result |
-|---|---|---:|---:|---:|---|
-| `eurovision-winner-2026` | **Bulgaria** | $0.076 | $2,194,407 | **$0.997** | **HIT ✓** |
-| `eurovision-2026-televote-winner` | **Bulgaria** | $0.122 | $59,916 | **$0.9995** | **HIT ✓** |
-| `eurovision-2026-jury-winner` | **Bulgaria** | $0.488 | $123,172 | **$0.9995** | **HIT ✓** |
-| `peru-presidential-election` | Keiko Fujimori | $0.458 | $2,716,789 | $0.6450 | OPEN |
+| Track | Script | Purpose |
+|---|---|---|
+| #1 Forward-test (going-forward) | [`event_smart_money_forward_test.py`](event_smart_money_forward_test.py) | Daily cron snapshots conviction-ranked picks for active events; report mode evaluates hit rate after resolution. |
+| #2 Retrospective backtest | [`event_smart_money_backtest.py`](event_smart_money_backtest.py) | Runs the analyzer on a curated list of resolved historical events ([`_event_seed_slugs.json`](_event_seed_slugs.json)). |
+| #3 Engine integration | `engine/event_smart_money.py` + CLI command + API endpoint | Operator-accessible analyzer for any event slug. |
 
-**Resolved: 3/3 hits (100%)** — but with the giant caveat below.
+## #2 — Retrospective backtest result
 
-## Mirror payoff (top-1 only, $5 per event)
+Filter: `--min-position-usd 2000 --min-avg-price 0.01`
 
-| Event | Deployed | Realized | ROI |
-|---|---:|---:|---:|
-| Eurovision main | $5 | $64.38 | +1188% |
-| Eurovision televote | $5 | $40.24 | +705% |
-| Eurovision jury | $5 | $10.14 | +103% |
-| **Aggregate** | **$15** | **$114.76** | **+665%** |
+| Metric | Value |
+|---|---|
+| Seed slugs analyzed | 28 |
+| Resolved events | 27 |
+| **Top-1 hits** | **26 / 27 = 96%** |
+| Top-1 mirror payoff | **+$209.11 on $135 deployed = +154.9% ROI** |
+| Top-3 mirror payoff | −$26.31 on $405 deployed = −6.5% ROI |
+| Top-5 mirror payoff | −$286.31 on $675 deployed = −42.4% ROI |
 
-Note how the magnitude tracks the avg buy price — smart money paid more for Bulgaria-Jury than Bulgaria-Main (0.488 vs 0.076), meaning they were less sure about jury vs televote. Lower avg-paid = bigger asymmetric payoff if the pick wins.
+The **only miss** was the NHL Presidents Trophy (smart money said Washington Capitals; Winnipeg Jets won).
 
-## The honest reading
+Top-1 is the sweet spot. The basket result for top-3/top-5 turns negative because the #2 and #3 picks (also nontrivial dollars at moderate prices) didn't win — picking ONLY the highest-conviction outcome and ignoring the runners-up is critical to the strategy.
 
-**3 of 3 is not the same as 100% hit rate.** The three Eurovision markets are correlated — they're three different ways to bet on the same underlying contest outcome (Bulgaria won the combined ranking, the televote, AND the jury vote). One sweep, three columns. The independent-sample count here is closer to **n = 1.5** than n = 3.
+### Per-category breakdown
 
-Peru is the only truly independent test in this batch, and it's not yet resolved. Top-1 conviction picked Keiko Fujimori; current implied YES is 65%, so the framework is leaning right but we won't know until the runoff resolves.
+| Category | n | hits | hit rate | top-1 ROI |
+|---|---:|---:|---:|---:|
+| culture (Eurovision) | 3 | 3 | 100% | +564.1% |
+| intl-politics | 4 | 4 | 100% | +106.1% |
+| sports | 16 | 15 | 94% | +101.3% |
+| us-politics | 4 | 4 | 100% | +111.3% |
 
-## What needs to happen before deploying capital
+Sports has the most volume but also the only miss. International politics + Eurovision were unanimous. The ROI ranges from +100% (NBA Champion, Champions League, NFL MVP, NBA East/West Finals, Eurovision Jury) up to +880% (Portugal presidential, where smart money paid 30¢ for the winner) and +880%-equivalent for Eurovision Main (+$44 on $5).
 
-1. **20+ truly independent resolved events.** Different categories (sports, politics, awards), different time horizons (next-week, next-month, next-year), different countries. Polymarket's gamma-api `/events` endpoint caps at 100 results and the `search` parameter is broken, so this is a real discoverability problem — needs either:
-   - Scraping the Polymarket UI's `/markets?_status=resolved` page
-   - Pulling from The Graph subgraph (`polymarket/matic-markets`) for the full event archive
-   - A maintained slug list of historically-significant winner-events
+### Reading the result honestly
 
-2. **Conviction score recalibration on more data.** The current `invested $ × avg_paid` formula was tuned for Eurovision. It might over- or under-weight signal on different market types (e.g., presidential elections where serious money sits at 50-60¢, vs sports where it sits at 20-40¢).
+1. **The signal is real but partially backward-looking**. `data-api.polymarket.com/v1/market-positions` returns current holder state — for resolved events, the YES winners are still in the top holders list. The strategy answers "did the wallets with the highest conviction at moderate prices win?" — and yes, they did, in 26 of 27. This validates the conviction formula and the lottery-filter.
 
-3. **Wallet-track-record overlay.** The top conviction holders on Bulgaria-YES (`rdba`, `CryptoVagabond`, `skk1ch`) should be cross-checked against their prior multi-event accuracy. A wallet that's been right on 5 of 7 past events is a stronger signal than a one-shot whale.
+2. **The pre-resolution test still has to happen** (#1). The current backtest reads holder data NOW, after resolution. To be truly predictive, we need to snapshot holder positions BEFORE the contest ends and check after — which is what #1 does going forward.
 
-4. **Forward-test paper soak.** Run the analyzer daily on upcoming events with end-dates ≤30 days out, log the top-1 pick at each scan, and measure hit rate after resolution. Three months of forward-only data is the cleanest proof.
+3. **96% is suspiciously high.** Possible failure modes the data can't yet exclude:
+   - Survivorship in `/v1/market-positions` (closed positions are included with realized PnL, but very-early sellers may not appear)
+   - The seed list itself is biased toward famous, decisive events (US presidential, NBA championship). Closer races would show lower hit rates.
+   - Sports MVPs are essentially-known months in advance — the smart money's win there isn't predictive insight, it's lagged pricing.
 
-## Next concrete step
+## #1 — Forward-test status
 
-I'd build a small `scripts/event_smart_money_backtest.py` that:
+First snapshot taken **2026-05-17** at [`_event_smart_money_snapshots.jsonl`](_event_smart_money_snapshots.jsonl):
+- 25 active multi-outcome winner-style events with end date within 60 days
+- Each snapshot records top-10 outcomes with conviction, avg paid, invested $, current YES, and holder count
+- Cron command (operator runs):
 
-- Maintains a curated list of historical event slugs in `scripts/_event_archive.json` (start with whatever's surfaceable via gamma + manual seeds).
-- For each slug, runs `event_smart_money.score_outcome` on a frozen snapshot of holders captured BEFORE resolution (would need to be scraped going forward, since live `/v1/market-positions` only returns current state).
-- Reports hit rate, mirror ROI per K, and per-category breakdowns.
+```
+0 10 * * * cd ~/playground/polymarket-trading-engine && \
+  uv run python scripts/event_smart_money_forward_test.py --mode snapshot \
+  >> logs/event_smart_money_forward_test.log 2>&1
+```
 
-Without that, every additional run is just another sample-of-one. Eurovision 2026 says the framework can work; it doesn't say it does work reliably.
+After ~30 days of daily snapshots, run `--mode report` to see hit rate on events that have resolved since their first snapshot. That's the clean forward-only test.
+
+## #3 — Engine integration
+
+Three surfaces:
+
+- **Engine module**: `src/polymarket_trading_engine/engine/event_smart_money.py` (analyze_event, score_outcome, fetch_market_state — single source of truth, used by the script, CLI, and API).
+- **CLI command**: `polymarket-trading-engine event-analyze <slug> [--min-position-usd 2000] [--min-avg-price 0.01] [--json]`
+- **API endpoint**: `GET /api/event-smart-money/{slug}?min_position_usd=2000&min_avg_price=0.01` — returns the same JSON shape, cached for 5 minutes per (slug, filters) tuple.
+- **Tests**: `tests/test_event_smart_money.py` (8 tests, all passing) covering conviction formula, lottery filter, position-size filter, vol-weighted avg, closed=true fallback, and the end-to-end analyzer.
+
+The CLI/API are read-only; they don't touch the daemon, journal, or settings store. This is an operator research tool, not a trading strategy in the daemon's decision loop.
+
+## Caveats before deploying real capital
+
+1. **Slippage**: the +154.9% ROI assumes mirror fills at `avg_paid` of the existing smart money — i.e. that you'd have bought in alongside them at the same prices. In reality, copying after their accumulation moves the price; realistic ROI is materially lower.
+2. **Position size**: $5/event is plausible but $500/event would be visible enough to move the orderbook on smaller markets. Need per-market liquidity gating before scaling.
+3. **Live-vs-resolved snapshot drift**: the retrospective backtest uses current holder data. For pre-resolution prediction, holder composition is different. Forward-test #1 is the cleanest test.
+4. **Sample bias**: 28 hand-curated events skewed toward famous, decisive contests. Close races and obscure events likely have lower hit rates.
+
+## Next steps
+
+The 96% hit rate is striking but the strategy needs:
+1. 30+ days of forward-test data from #1
+2. A position-sizing model that respects per-market liquidity
+3. A dashboard tab (Phase 4c, not built yet) so the operator can run the analyzer with one click instead of typing the CLI
+4. A daily cron that picks up the snapshot and sends a Slack alert if any new event shows a clear top-1 conviction (a forward-looking "watch list")
 
 ## Files
 
-- [`scripts/event_smart_money.py`](event_smart_money.py) — the analyzer itself
-- [`scripts/event_smart_money_eurovision-winner-2026.md`](event_smart_money_eurovision-winner-2026.md) — Eurovision main report
-- [`scripts/event_smart_money_eurovision-2026-televote-winner.md`](event_smart_money_eurovision-2026-televote-winner.md)
-- [`scripts/event_smart_money_eurovision-2026-jury-winner.md`](event_smart_money_eurovision-2026-jury-winner.md)
-- [`scripts/event_smart_money_peru-presidential-election-winner.md`](event_smart_money_peru-presidential-election-winner.md)
+- [`src/polymarket_trading_engine/engine/event_smart_money.py`](../src/polymarket_trading_engine/engine/event_smart_money.py) — engine module (analyzer core)
+- [`tests/test_event_smart_money.py`](../tests/test_event_smart_money.py) — 8 unit tests
+- [`scripts/event_smart_money.py`](event_smart_money.py) — CLI report writer (thin wrapper over engine)
+- [`scripts/event_smart_money_backtest.py`](event_smart_money_backtest.py) — #2 retrospective backtest
+- [`scripts/event_smart_money_backtest_report.md`](event_smart_money_backtest_report.md) — latest backtest run results
+- [`scripts/event_smart_money_forward_test.py`](event_smart_money_forward_test.py) — #1 daily cron snapshotter
+- [`scripts/_event_smart_money_snapshots.jsonl`](_event_smart_money_snapshots.jsonl) — snapshot archive (append-only)
+- [`scripts/_event_seed_slugs.json`](_event_seed_slugs.json) — curated historical event slugs

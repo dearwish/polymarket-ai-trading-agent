@@ -10,6 +10,10 @@ from rich.table import Table
 
 from polymarket_trading_engine.apps.daemon.run import run_daemon
 from polymarket_trading_engine.config import get_settings
+from polymarket_trading_engine.engine.event_smart_money import (
+    EventNotFoundError,
+    analyze_event,
+)
 from polymarket_trading_engine.service import AgentService
 
 app = typer.Typer(help="Operator CLI for the Polymarket Trading Engine.")
@@ -856,3 +860,68 @@ def settings_history(
         )
     except Exception as exc:
         _handle_operator_error(exc)
+
+
+@app.command("event-analyze")
+def event_analyze(
+    slug: str = typer.Argument(..., help="Polymarket event slug, e.g. 'eurovision-winner-2026'"),
+    min_position_usd: float = typer.Option(2000.0, "--min-position-usd",
+                                           help="Drop holders below this $ position size."),
+    min_avg_price: float = typer.Option(0.01, "--min-avg-price",
+                                        help="Drop holders whose avg buy price is below this (filters sub-cent lotto)."),
+    top_holders: int = typer.Option(30, "--top-holders",
+                                    help="Holders to pull per outcome from market-positions endpoint."),
+    json_only: bool = typer.Option(False, "--json", help="Print raw JSON instead of formatted table."),
+) -> None:
+    """Smart-money conviction ranking for a multi-outcome event.
+
+    Pulls top-N holders per outcome from Polymarket data-api, filters
+    lottery dust, scores each outcome by ``invested $ × avg paid price``,
+    and prints the ranked list. Read-only — no engine state is touched.
+    """
+    try:
+        result = analyze_event(
+            slug,
+            min_position_usd=min_position_usd,
+            min_avg_price=min_avg_price,
+            top_holders=top_holders,
+        )
+    except EventNotFoundError as exc:
+        console.print(f"[red]Event not found:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        _handle_operator_error(exc)
+        return
+
+    if json_only:
+        console.print_json(json.dumps(result))
+        return
+
+    console.print(f"\n[bold]Event:[/bold] {result['title']}")
+    console.print(f"[dim]slug={result['slug']} · end={result.get('end_date','')[:10]} · "
+                  f"outcomes={result['n_outcomes']}[/dim]\n")
+    table = Table(title="Smart-money conviction ranking")
+    table.add_column("#", justify="right")
+    table.add_column("Outcome")
+    table.add_column("YES now", justify="right")
+    table.add_column("Holders", justify="right")
+    table.add_column("Avg paid", justify="right")
+    table.add_column("Invested $", justify="right")
+    table.add_column("Conviction", justify="right")
+    for i, sig in enumerate(result["ranked_outcomes"][:15], 1):
+        table.add_row(
+            str(i),
+            sig["outcome"],
+            f"{sig['current_yes_price']:.4f}",
+            str(sig["yes_holders_count"]),
+            f"{sig['yes_avg_price']:.3f}",
+            f"${sig['yes_total_size_usd']:,.0f}",
+            f"{sig['smart_conviction']:,.0f}",
+        )
+    console.print(table)
+
+    if result["top_3"]:
+        console.print("\n[bold]Top-1 pick:[/bold] "
+                      f"{result['top_3'][0]['outcome']} "
+                      f"(invested ${result['top_3'][0]['yes_total_size_usd']:,.0f} "
+                      f"at avg {result['top_3'][0]['yes_avg_price']:.3f})")

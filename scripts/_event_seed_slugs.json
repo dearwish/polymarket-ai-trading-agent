@@ -1,0 +1,33 @@
+{
+  "comment": "Curated seed list of historical multi-outcome winner-style events on Polymarket for retrospective smart-money validation. Discovered via gamma-api /markets paginated search for 'win'-style questions. NOTE: market-positions data is CURRENT-state, so resolved events show the same holders today as at-resolution-time only if they didn't trade out. Closed positions ARE included with their realized PnL.",
+  "events": [
+    {"slug": "presidential-election-winner-2024", "expected_winner": "Donald Trump", "category": "us-politics"},
+    {"slug": "presidential-election-popular-vote-winner-2024", "expected_winner": "Donald Trump", "category": "us-politics"},
+    {"slug": "democratic-nominee-2024", "expected_winner": "Kamala Harris", "category": "us-politics"},
+    {"slug": "nba-champion-2024-2025", "expected_winner": null, "category": "sports"},
+    {"slug": "champions-league-winner-2025", "expected_winner": null, "category": "sports"},
+    {"slug": "english-premier-league-winner", "expected_winner": null, "category": "sports"},
+    {"slug": "premier-league-winner-24-25", "expected_winner": null, "category": "sports"},
+    {"slug": "superbowl-champion-2025", "expected_winner": null, "category": "sports"},
+    {"slug": "stanley-cup-winner", "expected_winner": null, "category": "sports"},
+    {"slug": "f1-drivers-champion", "expected_winner": null, "category": "sports"},
+    {"slug": "f1-constructors-championship-winner", "expected_winner": null, "category": "sports"},
+    {"slug": "serie-a-winner", "expected_winner": null, "category": "sports"},
+    {"slug": "la-liga-winner", "expected_winner": null, "category": "sports"},
+    {"slug": "la-liga-winner-114", "expected_winner": null, "category": "sports"},
+    {"slug": "nba-mvp-694", "expected_winner": null, "category": "sports"},
+    {"slug": "nfl-mvp-1", "expected_winner": null, "category": "sports"},
+    {"slug": "college-football-champion-2025", "expected_winner": null, "category": "sports"},
+    {"slug": "nba-eastern-conference-champion", "expected_winner": null, "category": "sports"},
+    {"slug": "nba-western-conference-champion", "expected_winner": null, "category": "sports"},
+    {"slug": "presidents-trophy-winner", "expected_winner": null, "category": "sports"},
+    {"slug": "romania-presidential-election-winner", "expected_winner": null, "category": "intl-politics"},
+    {"slug": "germany-parliamentary-election", "expected_winner": null, "category": "intl-politics"},
+    {"slug": "poland-presidential-election", "expected_winner": null, "category": "intl-politics"},
+    {"slug": "portugal-presidential-election", "expected_winner": null, "category": "intl-politics"},
+    {"slug": "new-york-city-mayoral-election", "expected_winner": null, "category": "us-politics"},
+    {"slug": "eurovision-winner-2026", "expected_winner": "Bulgaria", "category": "culture"},
+    {"slug": "eurovision-2026-televote-winner", "expected_winner": "Bulgaria", "category": "culture"},
+    {"slug": "eurovision-2026-jury-winner", "expected_winner": "Bulgaria", "category": "culture"}
+  ]
+}

@@ -42,88 +42,39 @@ import argparse
 import json
 import sys
 import time
-import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
-GAMMA_MARKET_URL = "https://gamma-api.polymarket.com/markets"
-POSITIONS_URL = "https://data-api.polymarket.com/v1/market-positions"
-
-
-def http_get(url: str, params: dict | None = None, timeout: int = 15) -> any:
-    if params:
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{url}?{qs}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
-
-
-@dataclass
-class OutcomeSignal:
-    country: str
-    condition_id: str
-    current_yes_price: float
-    current_no_price: float
-    closed: bool
-    # YES-side holdings (the smart money on this outcome being the winner)
-    yes_holders_count: int = 0
-    yes_total_size_usd: float = 0.0
-    yes_total_shares: float = 0.0
-    yes_total_realized_pnl: float = 0.0
-    yes_total_current_value: float = 0.0
-    yes_total_pnl: float = 0.0
-    yes_avg_price: float = 0.0  # vol-weighted
-    yes_top_wallets: list[tuple[str, str, float, float]] = field(default_factory=list)
-    # NO-side (the smart money betting AGAINST this outcome)
-    no_holders_count: int = 0
-    no_total_size_usd: float = 0.0
-    no_avg_price: float = 0.0
-    # Conviction score: how much smart money believes YES
-    smart_conviction: float = 0.0
+# Canonical analyzer lives in the engine package — script imports the
+# primitives from there so the CLI report-writer, the backtest, the
+# forward-test snapshot, and the API/CLI endpoints all share one
+# implementation (with the closed=true gamma fallback for resolved
+# markets, etc.).
+_SRC = Path(__file__).resolve().parent.parent / "src"
+sys.path.insert(0, str(_SRC))
+from polymarket_trading_engine.engine.event_smart_money import (  # noqa: E402
+    GAMMA_EVENTS_URL,
+    GAMMA_MARKET_URL,
+    POSITIONS_URL,
+    EventNotFoundError,
+    OutcomeSignal,
+    fetch_event as _engine_fetch_event,
+    fetch_holders,
+    fetch_market_state,
+    score_outcome as _engine_score_outcome,
+    _http_get as http_get,
+)
 
 
 def fetch_event(slug: str) -> dict:
-    data = http_get(GAMMA_EVENTS_URL, {"slug": slug})
-    if not data:
-        raise SystemExit(f"event not found: {slug}")
-    return data[0]
-
-
-def fetch_market_state(condition_id: str) -> tuple[float, float, bool]:
-    """Return (yes_price, no_price, closed) using the live per-market query."""
-    d = http_get(GAMMA_MARKET_URL, {"condition_ids": condition_id})
-    if not d:
-        return 0.0, 0.0, False
-    m = d[0]
-    px = m.get("outcomePrices")
-    if isinstance(px, str):
-        try:
-            px = json.loads(px)
-        except Exception:
-            px = None
-    yes = float(px[0]) if px else 0.0
-    no = float(px[1]) if (px and len(px) > 1) else 0.0
-    closed = bool(m.get("closed") or m.get("isResolved"))
-    return yes, no, closed
-
-
-def fetch_holders(condition_id: str, limit: int = 30) -> tuple[list[dict], list[dict]]:
-    """Return (yes_holders, no_holders) for a condition."""
-    data = http_get(POSITIONS_URL, {"market": condition_id, "limit": limit})
-    yes_holders: list[dict] = []
-    no_holders: list[dict] = []
-    for token_block in data:
-        for p in token_block.get("positions", []):
-            if p.get("outcomeIndex") == 0:
-                yes_holders.append(p)
-            else:
-                no_holders.append(p)
-    return yes_holders, no_holders
+    """Wrapper that preserves the script's original SystemExit-on-miss
+    semantics for backward compatibility with the report-writing CLI."""
+    try:
+        return _engine_fetch_event(slug)
+    except EventNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def score_outcome(
@@ -137,67 +88,16 @@ def score_outcome(
     min_position_usd: float,
     min_avg_price: float,
 ) -> OutcomeSignal:
-    sig = OutcomeSignal(
-        country=country,
-        condition_id=cid,
-        current_yes_price=yes_price,
-        current_no_price=no_price,
-        closed=closed,
+    """Compatibility shim — earlier consumers used positional ``country``
+    while the engine module exposes ``outcome``. The returned OutcomeSignal
+    has ``.outcome`` field but we expose ``.country`` here as an alias so
+    the script's report writer keeps working without churn."""
+    sig = _engine_score_outcome(
+        country, cid, yes_price, no_price, closed,
+        yes_holders, no_holders, min_position_usd, min_avg_price,
     )
-    # YES-side aggregation. Skip $0-cost positions (whales with no avg
-    # price are typically Polymarket internal liquidity, not signal).
-    # Also skip sub-cent buys — those are lottery tickets, not signal.
-    yes_filtered = [
-        p for p in yes_holders
-        if float(p.get("totalBought") or 0) >= min_position_usd
-        and float(p.get("avgPrice") or 0) >= min_avg_price
-    ]
-    if yes_filtered:
-        sig.yes_holders_count = len(yes_filtered)
-        for p in yes_filtered:
-            bought = float(p.get("totalBought") or 0)
-            sig.yes_total_size_usd += bought
-            sig.yes_total_shares += float(p.get("size") or 0)
-            sig.yes_total_realized_pnl += float(p.get("realizedPnl") or 0)
-            sig.yes_total_current_value += float(p.get("currentValue") or 0)
-            sig.yes_total_pnl += float(p.get("totalPnl") or 0)
-        # Volume-weighted average buy price.
-        total_weighted = sum(
-            float(p.get("avgPrice") or 0) * float(p.get("totalBought") or 0)
-            for p in yes_filtered
-        )
-        sig.yes_avg_price = total_weighted / sig.yes_total_size_usd if sig.yes_total_size_usd > 0 else 0.0
-        # Top wallets compact form for reporting.
-        yes_filtered.sort(key=lambda p: -float(p.get("totalBought") or 0))
-        for p in yes_filtered[:5]:
-            sig.yes_top_wallets.append((
-                str(p.get("proxyWallet") or "")[:10] + "…",
-                str(p.get("name") or "")[:18],
-                float(p.get("avgPrice") or 0),
-                float(p.get("totalBought") or 0),
-            ))
-        # Conviction: invested $ × avg paid price. Rewards moderate-price
-        # accumulation (5-30¢ buys at scale) and naturally penalises both
-        # sub-cent lotto buys (avg_price tiny → near-zero conviction) and
-        # late-stage "buying at $0.95 to lock in 5%" yield trades (small
-        # positions). This is a pre-resolution signal — it doesn't know
-        # the answer yet, just where serious money is sitting.
-        sig.smart_conviction = sig.yes_total_size_usd * sig.yes_avg_price
-
-    # NO-side aggregation (smart money against this outcome winning).
-    no_filtered = [
-        p for p in no_holders
-        if float(p.get("totalBought") or 0) >= min_position_usd
-        and float(p.get("avgPrice") or 0) >= min_avg_price
-    ]
-    if no_filtered:
-        sig.no_holders_count = len(no_filtered)
-        sig.no_total_size_usd = sum(float(p.get("totalBought") or 0) for p in no_filtered)
-        total_weighted = sum(
-            float(p.get("avgPrice") or 0) * float(p.get("totalBought") or 0)
-            for p in no_filtered
-        )
-        sig.no_avg_price = total_weighted / sig.no_total_size_usd if sig.no_total_size_usd > 0 else 0.0
+    # Add a ``country`` attribute alias for legacy report code.
+    object.__setattr__(sig, "country", sig.outcome)
     return sig
 
 
@@ -238,7 +138,15 @@ def write_report(event_title: str, signals: list[OutcomeSignal], out_path: Path)
         sections.append(f"### {s.country} (conviction {s.smart_conviction:,.0f}, current YES {s.current_yes_price:.4f})\n")
         sections.append("| wallet | name | avg buy price | $ invested |")
         sections.append("|---|---|---:|---:|")
-        for w, name, avg, bought in s.yes_top_wallets:
+        for wallet_info in s.yes_top_wallets:
+            # Engine module returns dicts; old script used tuples — handle both.
+            if isinstance(wallet_info, dict):
+                w = wallet_info["wallet"][:10] + "…"
+                name = wallet_info["name"][:18]
+                avg = wallet_info["avg_price"]
+                bought = wallet_info["bought_usd"]
+            else:
+                w, name, avg, bought = wallet_info
             sections.append(f"| `{w}` | {name} | {avg:.3f} | ${bought:,.0f} |")
         sections.append("")
 
