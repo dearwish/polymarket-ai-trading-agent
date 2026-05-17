@@ -700,6 +700,46 @@ def create_app(
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+    @app.get("/api/event-smart-money")
+    def event_smart_money_archive() -> dict:
+        """Latest snapshot per tracked event from the daily cron archive.
+
+        Used by the dashboard's Event Signals tab to render the watchlist
+        without hitting Polymarket APIs on every page load. Each row is
+        the freshest snapshot for that slug — daily cron entries
+        accumulate over time so the archive grows but the per-slug list
+        stays bounded."""
+        from pathlib import Path
+        import json as _json
+        archive_path = Path("scripts/_event_smart_money_snapshots.jsonl")
+        if not archive_path.exists():
+            return {"snapshots": [], "total_records": 0}
+        latest: dict[str, dict] = {}
+        total = 0
+        try:
+            with archive_path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    total += 1
+                    slug = row.get("slug")
+                    if not slug:
+                        continue
+                    existing = latest.get(slug)
+                    # Keep the NEWEST snapshot per slug for the watchlist.
+                    if existing is None or row.get("snapshot_ts", "") > existing.get("snapshot_ts", ""):
+                        latest[slug] = row
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"snapshot archive unreadable: {exc}") from exc
+        # Sort by end_date ascending — closest-to-resolution first.
+        ordered = sorted(latest.values(), key=lambda r: r.get("end_date") or "9999")
+        return {"snapshots": ordered, "total_records": total}
+
     @app.get("/api/event-smart-money/{slug}")
     def event_smart_money(
         slug: str,

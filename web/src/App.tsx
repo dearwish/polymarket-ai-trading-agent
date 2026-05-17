@@ -1,6 +1,62 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "settings" | "daemon";
+type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "event-signals" | "settings" | "daemon";
+
+type EventSnapshotPick = {
+  country?: string;
+  outcome?: string;
+  conviction: number;
+  yes_avg_price: number;
+  yes_total_size_usd: number;
+  current_yes_price: number;
+  yes_holders_count: number;
+};
+
+type EventSnapshotRow = {
+  snapshot_ts: string;
+  snapshot_date: string;
+  slug: string;
+  title: string;
+  end_date: string;
+  n_outcomes: number;
+  top10: EventSnapshotPick[];
+};
+
+type EventSnapshotArchive = {
+  snapshots: EventSnapshotRow[];
+  total_records: number;
+};
+
+type EventSmartMoneyTopWallet = {
+  wallet: string;
+  name: string;
+  avg_price: number;
+  bought_usd: number;
+};
+
+type EventSmartMoneyRanked = {
+  outcome: string;
+  condition_id: string;
+  current_yes_price: number;
+  current_no_price: number;
+  closed: boolean;
+  yes_holders_count: number;
+  yes_total_size_usd: number;
+  yes_total_pnl: number;
+  yes_avg_price: number;
+  yes_top_wallets: EventSmartMoneyTopWallet[];
+  smart_conviction: number;
+};
+
+type EventSmartMoneyDetail = {
+  slug: string;
+  title: string;
+  end_date: string | null;
+  n_outcomes: number;
+  ranked_outcomes: EventSmartMoneyRanked[];
+  top_3: EventSmartMoneyRanked[];
+  filters: { min_position_usd: number; min_avg_price: number; top_holders_per_outcome: number };
+};
 
 type StatusPayload = {
   trading_mode: string;
@@ -613,6 +669,7 @@ const VIEWS: Array<{ key: ViewKey; label: string }> = [
   { key: "orders", label: "Orders & Trades" },
   { key: "portfolio", label: "Portfolio" },
   { key: "events", label: "Event Log" },
+  { key: "event-signals", label: "Event Signals" },
   { key: "settings", label: "Settings" },
   { key: "daemon", label: "Daemon" },
 ];
@@ -2387,6 +2444,309 @@ function EventsPage({ events, report }: { events: RecentEvent[]; report: ReportP
   );
 }
 
+function EventSmartMoneyPage() {
+  const [archive, setArchive] = useState<EventSnapshotArchive | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveLoading, setArchiveLoading] = useState<boolean>(false);
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [customSlug, setCustomSlug] = useState<string>("");
+  const [detail, setDetail] = useState<EventSmartMoneyDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState<boolean>(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [minPositionUsd, setMinPositionUsd] = useState<number>(2000);
+  const [minAvgPrice, setMinAvgPrice] = useState<number>(0.01);
+
+  const refreshArchive = async () => {
+    setArchiveLoading(true);
+    setArchiveError(null);
+    try {
+      const data = await fetchJson<EventSnapshotArchive>("/api/event-smart-money");
+      setArchive(data);
+    } catch (exc) {
+      setArchiveError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setArchiveLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshArchive();
+  }, []);
+
+  const loadDetail = async (slug: string) => {
+    setSelectedSlug(slug);
+    setDetail(null);
+    setDetailLoading(true);
+    setDetailError(null);
+    try {
+      const qs = new URLSearchParams({
+        min_position_usd: String(minPositionUsd),
+        min_avg_price: String(minAvgPrice),
+      });
+      const data = await fetchJson<EventSmartMoneyDetail>(
+        `/api/event-smart-money/${encodeURIComponent(slug)}?${qs}`,
+      );
+      setDetail(data);
+    } catch (exc) {
+      setDetailError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const handleCustomAnalyze = () => {
+    const slug = customSlug.trim();
+    if (!slug) {
+      return;
+    }
+    void loadDetail(slug);
+  };
+
+  const snapshots = archive?.snapshots ?? [];
+
+  return (
+    <section className="page-section">
+      <article className="card">
+        <header className="card-header">
+          <h2>Event Smart-Money Signals</h2>
+          <p className="muted">
+            Daily-snapshotted conviction ranking of multi-outcome Polymarket events.
+            Top-1 by conviction has hit the actual winner in 26/27 resolved historical events
+            in the validation backtest (+154.9% ROI on the top-1 basket). Forward-test
+            cron writes one snapshot per event per day to
+            <code> scripts/_event_smart_money_snapshots.jsonl</code>.
+          </p>
+        </header>
+        <div className="form-row">
+          <label className="form-label">
+            Min position ($)
+            <input
+              type="number"
+              value={minPositionUsd}
+              min={0}
+              step={100}
+              onChange={(e) => setMinPositionUsd(Number(e.target.value) || 0)}
+            />
+          </label>
+          <label className="form-label">
+            Min avg price
+            <input
+              type="number"
+              value={minAvgPrice}
+              min={0}
+              max={1}
+              step={0.001}
+              onChange={(e) => setMinAvgPrice(Number(e.target.value) || 0)}
+            />
+          </label>
+          <label className="form-label" style={{ flex: 1 }}>
+            Custom slug
+            <input
+              type="text"
+              value={customSlug}
+              placeholder="e.g. eurovision-winner-2026"
+              onChange={(e) => setCustomSlug(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  handleCustomAnalyze();
+                }
+              }}
+            />
+          </label>
+          <button type="button" className="refresh-button" onClick={handleCustomAnalyze}>
+            Analyze
+          </button>
+          <button type="button" className="refresh-button" onClick={() => void refreshArchive()}>
+            Refresh watchlist
+          </button>
+        </div>
+      </article>
+
+      <article className="card">
+        <header className="card-header">
+          <h2>Watchlist · {snapshots.length} events</h2>
+          {archive && (
+            <span className="muted">
+              {archive.total_records} total snapshot rows in archive
+            </span>
+          )}
+        </header>
+        {archiveError && <div className="banner error">{archiveError}</div>}
+        {archiveLoading && <div className="muted">Loading watchlist…</div>}
+        {!archiveLoading && snapshots.length === 0 && !archiveError && (
+          <p className="muted">
+            No snapshots yet. The cron job at 07:00 IDT writes one row per active event per day.
+            Run <code>uv run python scripts/event_smart_money_forward_test.py --mode snapshot</code>{" "}
+            to populate immediately.
+          </p>
+        )}
+        {snapshots.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>End date</th>
+                  <th>Event</th>
+                  <th>Top-1 pick</th>
+                  <th style={{ textAlign: "right" }}>Avg paid</th>
+                  <th style={{ textAlign: "right" }}>Invested $</th>
+                  <th style={{ textAlign: "right" }}>Current YES</th>
+                  <th style={{ textAlign: "right" }}>Conviction</th>
+                  <th>Snapshot</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snapshots.map((row) => {
+                  const top = row.top10?.[0];
+                  const isSelected = selectedSlug === row.slug;
+                  const pickName = top ? (top.country ?? top.outcome ?? "—") : "—";
+                  return (
+                    <tr
+                      key={row.slug}
+                      className={isSelected ? "selected-row" : ""}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => void loadDetail(row.slug)}
+                    >
+                      <td>{(row.end_date ?? "").slice(0, 10) || "—"}</td>
+                      <td>
+                        <div>{row.title}</div>
+                        <div className="muted" style={{ fontSize: "0.85em" }}>{row.slug}</div>
+                      </td>
+                      <td>{pickName}</td>
+                      <td style={{ textAlign: "right" }}>
+                        {top ? top.yes_avg_price.toFixed(3) : "—"}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        {top ? `$${top.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        {top ? top.current_yes_price.toFixed(4) : "—"}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        {top ? top.conviction.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—"}
+                      </td>
+                      <td className="muted">{row.snapshot_date}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </article>
+
+      {selectedSlug && (
+        <article className="card">
+          <header className="card-header">
+            <h2>Detail · {detail?.title ?? selectedSlug}</h2>
+            <span className="muted">
+              slug=<code>{selectedSlug}</code>
+              {detail?.end_date ? ` · end=${detail.end_date.slice(0, 10)}` : ""}
+              {detail ? ` · ${detail.n_outcomes} outcomes` : ""}
+            </span>
+          </header>
+          {detailLoading && <div className="muted">Fetching live conviction signal (5–30s)…</div>}
+          {detailError && <div className="banner error">{detailError}</div>}
+          {detail && (
+            <>
+              {detail.ranked_outcomes.length === 0 && (
+                <p className="muted">
+                  No outcomes pass the filter at this min-position / min-avg-price combination.
+                  Try lowering either threshold.
+                </p>
+              )}
+              {detail.ranked_outcomes.length > 0 && (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Outcome</th>
+                        <th style={{ textAlign: "right" }}>Current YES</th>
+                        <th style={{ textAlign: "right" }}>Holders</th>
+                        <th style={{ textAlign: "right" }}>Avg paid</th>
+                        <th style={{ textAlign: "right" }}>Invested $</th>
+                        <th style={{ textAlign: "right" }}>Total PnL</th>
+                        <th style={{ textAlign: "right" }}>Conviction</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.ranked_outcomes.slice(0, 20).map((sig, idx) => (
+                        <tr key={sig.condition_id || sig.outcome}>
+                          <td>{idx + 1}</td>
+                          <td>
+                            <strong>{sig.outcome}</strong>
+                          </td>
+                          <td style={{ textAlign: "right" }}>{sig.current_yes_price.toFixed(4)}</td>
+                          <td style={{ textAlign: "right" }}>{sig.yes_holders_count}</td>
+                          <td style={{ textAlign: "right" }}>{sig.yes_avg_price.toFixed(3)}</td>
+                          <td style={{ textAlign: "right" }}>
+                            ${sig.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                          </td>
+                          <td style={{ textAlign: "right", color: sig.yes_total_pnl >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)" }}>
+                            {sig.yes_total_pnl >= 0 ? "+" : ""}${sig.yes_total_pnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            {sig.smart_conviction.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {detail.top_3.length > 0 && (
+                <>
+                  <h3 style={{ marginTop: "1.5em" }}>Top wallets in top-3 outcomes</h3>
+                  {detail.top_3.map((sig) => (
+                    <div key={`wallets-${sig.condition_id}`} style={{ marginBottom: "1em" }}>
+                      <h4>
+                        {sig.outcome} <span className="muted">(current YES {sig.current_yes_price.toFixed(4)})</span>
+                      </h4>
+                      {sig.yes_top_wallets.length === 0 ? (
+                        <p className="muted">No filtered holders for this outcome.</p>
+                      ) : (
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Wallet</th>
+                                <th>Name</th>
+                                <th style={{ textAlign: "right" }}>Avg paid</th>
+                                <th style={{ textAlign: "right" }}>Bought $</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sig.yes_top_wallets.map((w) => (
+                                <tr key={`${sig.condition_id}-${w.wallet}`}>
+                                  <td>
+                                    <code style={{ fontSize: "0.85em" }}>
+                                      {w.wallet.slice(0, 8)}…{w.wallet.slice(-4)}
+                                    </code>
+                                  </td>
+                                  <td>{w.name || <span className="muted">(anon)</span>}</td>
+                                  <td style={{ textAlign: "right" }}>{w.avg_price.toFixed(3)}</td>
+                                  <td style={{ textAlign: "right" }}>
+                                    ${w.bought_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
+            </>
+          )}
+        </article>
+      )}
+    </section>
+  );
+}
+
 function SettingsPage({
   settings,
   onSettingsUpdated,
@@ -2983,6 +3343,9 @@ export default function App() {
           { label: "Events", value: state.recentEvents.length },
           { label: "Types", value: new Set(state.recentEvents.map((e) => e.event_type)).size },
         ];
+      case "event-signals":
+        // The component manages its own fetch — no shared state to summarize.
+        return [];
       case "settings":
         return [
           { label: "Fields", value: Object.keys(state.settings?.fields ?? {}).length },
@@ -3003,6 +3366,8 @@ export default function App() {
         return <PortfolioPage summary={state.portfolioSummary} positions={state.closedPositions?.positions ?? []} openPositions={state.openPositions?.positions ?? []} equityCurve={state.equityCurve} daemonTicks={state.daemonTicks} heartbeat={state.daemonHeartbeat} settings={state.settings} />;
       case "events":
         return <EventsPage events={state.recentEvents} report={state.report} />;
+      case "event-signals":
+        return <EventSmartMoneyPage />;
       case "settings":
         return (
           <SettingsPage
@@ -3098,7 +3463,7 @@ export default function App() {
       {loading && <div className="banner">Loading dashboard...</div>}
       {error && <div className="banner error">{error}</div>}
 
-      {activeView !== "daemon" && <InfoBar heartbeat={state.daemonHeartbeat} items={infoBarItems} />}
+      {activeView !== "daemon" && activeView !== "event-signals" && <InfoBar heartbeat={state.daemonHeartbeat} items={infoBarItems} />}
       {currentView}
     </div>
   );

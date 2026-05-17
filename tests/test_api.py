@@ -448,3 +448,51 @@ def test_api_action_live_watch() -> None:
     payload = response.json()
     assert payload["action"] == "live-watch"
     assert payload["iterations_completed"] == 2
+
+
+def test_api_event_smart_money_archive_empty(tmp_path, monkeypatch) -> None:
+    """No snapshot file → returns empty list cleanly, not 500."""
+    monkeypatch.chdir(tmp_path)  # ensure scripts/ doesn't exist
+    client = TestClient(create_app(lambda: StubService()))
+    r = client.get("/api/event-smart-money")
+    assert r.status_code == 200
+    assert r.json() == {"snapshots": [], "total_records": 0}
+
+
+def test_api_event_smart_money_archive_reads_jsonl(tmp_path, monkeypatch) -> None:
+    """Reads JSONL, dedupes by slug keeping the newest snapshot per slug,
+    skips bad lines, sorts by end_date ascending."""
+    import json as _json
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "scripts").mkdir()
+    rows = [
+        # Two snapshots for same slug — should dedupe to the newest.
+        {"slug": "a-event", "title": "A", "snapshot_ts": "2026-05-15T00:00:00Z",
+         "snapshot_date": "2026-05-15", "end_date": "2026-06-30T00:00:00Z",
+         "n_outcomes": 5, "top10": [{"country": "Old", "conviction": 1.0,
+         "yes_avg_price": 0.1, "yes_total_size_usd": 100.0,
+         "current_yes_price": 0.1, "yes_holders_count": 1}]},
+        {"slug": "a-event", "title": "A", "snapshot_ts": "2026-05-17T00:00:00Z",
+         "snapshot_date": "2026-05-17", "end_date": "2026-06-30T00:00:00Z",
+         "n_outcomes": 5, "top10": [{"country": "New", "conviction": 2.0,
+         "yes_avg_price": 0.2, "yes_total_size_usd": 200.0,
+         "current_yes_price": 0.2, "yes_holders_count": 2}]},
+        # Earlier end_date — should appear first in sorted output.
+        {"slug": "b-event", "title": "B", "snapshot_ts": "2026-05-16T00:00:00Z",
+         "snapshot_date": "2026-05-16", "end_date": "2026-05-20T00:00:00Z",
+         "n_outcomes": 3, "top10": []},
+    ]
+    archive = tmp_path / "scripts" / "_event_smart_money_snapshots.jsonl"
+    archive.write_text("\n".join(_json.dumps(r) for r in rows) + "\nnot-json-noise\n")
+
+    client = TestClient(create_app(lambda: StubService()))
+    r = client.get("/api/event-smart-money")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["total_records"] == 3  # bad line not counted
+    snaps = payload["snapshots"]
+    assert [s["slug"] for s in snaps] == ["b-event", "a-event"]  # by end_date
+    # a-event deduped to NEWEST.
+    a_event = next(s for s in snaps if s["slug"] == "a-event")
+    assert a_event["snapshot_date"] == "2026-05-17"
+    assert a_event["top10"][0]["country"] == "New"
