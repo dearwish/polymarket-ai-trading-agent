@@ -559,6 +559,45 @@ def create_app(
             raise HTTPException(status_code=502, detail=f"data-api positions failed: {exc}") from exc
         if not isinstance(raw, list):
             raw = []
+        # First pass: collect unique event slugs, then fetch each event
+        # once from gamma to build a condition_id → groupItemTitle map.
+        # The data-api positions endpoint only returns the binary market
+        # title ("Will the X win...") which makes the YES/NO outcome
+        # useless for identifying *which* option the operator actually
+        # bet on. groupItemTitle is the canonical option name
+        # ("Colorado Avalanche") used by Polymarket's UI.
+        event_slugs = {str(p.get("eventSlug") or "") for p in raw if p.get("eventSlug")}
+        option_title_by_cid: dict[str, str] = {}
+        event_title_by_cid: dict[str, str] = {}
+        for ev_slug in event_slugs:
+            try:
+                gamma_url = f"https://gamma-api.polymarket.com/events?{_urlparse.urlencode({'slug': ev_slug})}"
+                req = _urllib.Request(gamma_url, headers={"User-Agent": "Mozilla/5.0"})
+                with _urllib.urlopen(req, timeout=10) as resp:
+                    event_data = json.loads(resp.read())
+            except Exception:
+                continue
+            if not isinstance(event_data, list) or not event_data:
+                continue
+            event = event_data[0]
+            ev_title = event.get("title", "")
+            for m in event.get("markets", []):
+                cid = str(m.get("conditionId") or "")
+                if not cid:
+                    continue
+                option = m.get("groupItemTitle") or ""
+                # groupItemTitle is canonical when present; otherwise
+                # fall back to parsing the market question.
+                if not option:
+                    q = str(m.get("question") or "")
+                    # "Will the Colorado Avalanche win ..." → "Colorado Avalanche"
+                    import re as _re
+                    match = _re.match(r"^Will (?:the )?(.+?) (?:win|beat|defeat|advance|reach|qualify)", q, _re.IGNORECASE)
+                    if match:
+                        option = match.group(1)
+                option_title_by_cid[cid] = option
+                event_title_by_cid[cid] = ev_title
+
         positions: list[dict] = []
         total_cost = 0.0
         total_current = 0.0
@@ -575,14 +614,24 @@ def create_app(
             total_cost += cost
             total_current += current_value
             total_cash_pnl += cash_pnl
+            cid = str(p.get("conditionId") or "")
+            # For YES/NO outcomes the option name is the team/candidate
+            # (groupItemTitle). For directional outcomes ("Up", "Down")
+            # the outcome string itself IS the option, so fall back to it.
+            raw_outcome = str(p.get("outcome", ""))
+            option_title = option_title_by_cid.get(cid, "")
+            if not option_title and raw_outcome and raw_outcome.lower() not in {"yes", "no"}:
+                option_title = raw_outcome
             positions.append({
                 "title": p.get("title", ""),
+                "option_title": option_title,
+                "event_title": event_title_by_cid.get(cid, ""),
                 "slug": p.get("slug", ""),
                 "event_slug": p.get("eventSlug", ""),
-                "outcome": p.get("outcome", ""),
+                "outcome": raw_outcome,
                 "outcome_index": p.get("outcomeIndex"),
                 "asset": str(p.get("asset", "")),
-                "condition_id": p.get("conditionId", ""),
+                "condition_id": cid,
                 "size": size,
                 "avg_price": avg_price,
                 "current_price": cur_price,

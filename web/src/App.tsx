@@ -4,6 +4,8 @@ type ViewKey = "overview" | "decisions" | "orders" | "portfolio" | "events" | "e
 
 type LivePosition = {
   title: string;
+  option_title?: string;
+  event_title?: string;
   slug: string;
   event_slug: string;
   outcome: string;
@@ -3455,18 +3457,33 @@ function LivePortfolioPage({ liveOrders }: { liveOrders: LiveOrder[] }) {
                         style={rowStyle}
                         title={isPast ? "Event ended — position is settled, no longer actionable" : undefined}>
                       <td>
-                        {eventSlug ? (
-                          <a
-                            href={`https://polymarket.com/event/${encodeURIComponent(eventSlug)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{ color: "inherit", textDecoration: "underline" }}
-                          >
-                            {p.title}
-                          </a>
-                        ) : (
-                          p.title
-                        )}
+                        {/* Primary: the option you actually bet on (team / candidate / direction).
+                            Secondary: the underlying market question for context. */}
+                        {(() => {
+                          // Best-effort primary label. Backend enrichment provides
+                          // option_title when available; fall back to the YES/NO outcome
+                          // if the gamma /events lookup didn't surface a groupItemTitle.
+                          const primary = (p.option_title && p.option_title.trim()) || p.outcome || "—";
+                          const secondary = p.event_title || p.title || "";
+                          const linkHref = eventSlug
+                            ? `https://polymarket.com/event/${encodeURIComponent(eventSlug)}`
+                            : null;
+                          return (
+                            <>
+                              <div style={{ fontWeight: 600 }}>
+                                {linkHref ? (
+                                  <a href={linkHref} target="_blank" rel="noopener noreferrer"
+                                     style={{ color: "inherit", textDecoration: "underline" }}>
+                                    {primary}
+                                  </a>
+                                ) : primary}
+                              </div>
+                              {secondary && secondary !== primary && (
+                                <div className="muted" style={{ fontSize: "0.85em" }}>{secondary}</div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </td>
                       <td>
                         <span className={`pill ${p.outcome_index === 0 ? "positive" : "negative"}`}
