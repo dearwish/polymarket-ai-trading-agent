@@ -2444,6 +2444,16 @@ function EventsPage({ events, report }: { events: RecentEvent[]; report: ReportP
   );
 }
 
+// Render a 0..1 Polymarket implied probability as cents (e.g. 0.5850 → "58.5¢").
+// Sub-cent values use one decimal too so 0.0005 → "0.1¢" instead of "0.0¢".
+function formatCents(price: number | null | undefined): string {
+  if (price == null || !Number.isFinite(price)) return "—";
+  const cents = price * 100;
+  // Avoid the awkward "100.0¢" when we're effectively at full resolution.
+  if (cents >= 99.95) return "100¢";
+  return `${cents.toFixed(1)}¢`;
+}
+
 function EventSmartMoneyPage() {
   const [archive, setArchive] = useState<EventSnapshotArchive | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
@@ -2842,13 +2852,13 @@ function EventSmartMoneyPage() {
                       </td>
                       <td>{pickName}</td>
                       <td style={{ textAlign: "right" }}>
-                        {top ? top.yes_avg_price.toFixed(3) : "—"}
+                        {top ? formatCents(top.yes_avg_price) : "—"}
                       </td>
                       <td style={{ textAlign: "right" }}>
                         {top ? `$${top.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
                       </td>
                       <td style={{ textAlign: "right" }}>
-                        {top ? top.current_yes_price.toFixed(4) : "—"}
+                        {top ? formatCents(top.current_yes_price) : "—"}
                       </td>
                       <td style={{ textAlign: "right" }}>
                         {top ? top.conviction.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—"}
@@ -2952,9 +2962,9 @@ function EventSmartMoneyPage() {
                                 <td>
                                   <strong>{sig.outcome}</strong>
                                 </td>
-                                <td style={{ textAlign: "right" }}>{sig.current_yes_price.toFixed(4)}</td>
+                                <td style={{ textAlign: "right" }}>{formatCents(sig.current_yes_price)}</td>
                                 <td style={{ textAlign: "right" }}>{sig.yes_holders_count}</td>
-                                <td style={{ textAlign: "right" }}>{sig.yes_avg_price.toFixed(3)}</td>
+                                <td style={{ textAlign: "right" }}>{formatCents(sig.yes_avg_price)}</td>
                                 <td style={{ textAlign: "right" }}>
                                   ${sig.yes_total_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                 </td>
@@ -2989,7 +2999,7 @@ function EventSmartMoneyPage() {
                   {detail.top_3.map((sig) => (
                     <div key={`wallets-${sig.condition_id}`} style={{ marginBottom: "1em" }}>
                       <h4>
-                        {sig.outcome} <span className="muted">(current YES {sig.current_yes_price.toFixed(4)})</span>
+                        {sig.outcome} <span className="muted">(current YES {formatCents(sig.current_yes_price)})</span>
                       </h4>
                       {sig.yes_top_wallets.length === 0 ? (
                         <p className="muted">No filtered holders for this outcome.</p>
@@ -3013,7 +3023,7 @@ function EventSmartMoneyPage() {
                                     </code>
                                   </td>
                                   <td>{w.name || <span className="muted">(anon)</span>}</td>
-                                  <td style={{ textAlign: "right" }}>{w.avg_price.toFixed(3)}</td>
+                                  <td style={{ textAlign: "right" }}>{formatCents(w.avg_price)}</td>
                                   <td style={{ textAlign: "right" }}>
                                     ${w.bought_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                   </td>
