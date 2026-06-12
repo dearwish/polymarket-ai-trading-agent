@@ -26,6 +26,7 @@ from polymarket_trading_engine.engine.event_smart_money import (
     estimate_fill,
     fetch_orderbook,
 )
+from polymarket_trading_engine.engine.fees import round_trip_fee_usd
 from polymarket_trading_engine.service import AgentService
 
 
@@ -1088,14 +1089,24 @@ def create_app(
     def closed_positions(limit: int = Query(100, ge=1, le=500), service: AgentService = Depends(service_factory)) -> dict:
         positions = service.portfolio.list_closed_positions(limit=limit)
         fee_bps = float(service.settings.fee_bps)
+        fee_rate = float(service.settings.fee_taker_rate)
         cumulative = 0.0
         items = []
         for position in reversed(positions):
             cumulative += position.realized_pnl
-            # Round-trip fee estimate on this tranche's size. Back-computed from the
-            # current fee_bps setting — accurate when fee_bps has been stable over
+            # Round-trip fee estimate on this tranche. Back-computed from the
+            # current fee settings — accurate when they have been stable over
             # the position's lifetime (typically the case).
-            fees_paid = round(position.size_usd * (fee_bps / 10_000.0) * 2.0, 6) if fee_bps > 0 else 0.0
+            fees_paid = round(
+                round_trip_fee_usd(
+                    position.size_usd,
+                    position.entry_price,
+                    position.exit_price or position.entry_price,
+                    taker_fee_rate=fee_rate,
+                    flat_fee_bps=fee_bps,
+                ),
+                6,
+            )
             items.append(
                 {
                     "market_id": position.market_id,

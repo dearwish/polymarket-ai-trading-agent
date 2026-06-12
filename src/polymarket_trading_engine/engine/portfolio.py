@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from polymarket_trading_engine.engine.db import configure_connection
+from polymarket_trading_engine.engine.fees import round_trip_fee_usd
 from polymarket_trading_engine.types import (
     AccountState,
     ExecutionMode,
@@ -62,17 +63,21 @@ class PortfolioEngine:
         starting_balance_usd: float,
         exit_slippage_bps: float = 0.0,
         fee_bps: float = 0.0,
+        taker_fee_rate: float = 0.0,
         settings: "object | None" = None,
     ):
         self.db_path = db_path
         self.starting_balance_usd = starting_balance_usd
         # Applied at close: exit_price is reduced by exit_slippage_bps (the
         # sell-side slippage — we're closing the position regardless of side,
-        # so both YES and NO exits get hit). fee_bps is deducted as a round-trip
+        # so both YES and NO exits get hit). Fees are deducted as a round-trip
         # cost from the realised PnL so paper accounting matches the scorer's
-        # pre-trade edge calculation.
+        # pre-trade edge calculation. ``taker_fee_rate`` > 0 selects the
+        # Polymarket curve (shares × rate × p(1−p) per leg) and supersedes
+        # the legacy flat ``fee_bps``.
         self.exit_slippage_bps = max(0.0, float(exit_slippage_bps))
         self.fee_bps = max(0.0, float(fee_bps))
+        self.taker_fee_rate = max(0.0, float(taker_fee_rate))
         # Settings ref so :meth:`resolve_starting_balance` can read live
         # ``paper_starting_balance_per_strategy`` overrides on every call.
         # The daemon's reload loop replaces ``self.settings`` when settings
@@ -208,9 +213,14 @@ class PortfolioEngine:
         reserved = sum(position.size_usd for position in open_positions)
         exposure = self._compute_exposure(open_positions)
         starting_balance = self.resolve_starting_balance(strategy_id)
+        # MM liquidity-reward accruals are real income and must show up in
+        # the account, not just in a side table — the 2026-06-12 audit found
+        # they were logged but never credited, which understated the MM
+        # strategy's balance and overstated everything relative to it.
+        reward_usd = self.total_reward_accrued(strategy_id=strategy_id)
         return AccountState(
             mode=mode,
-            available_usd=starting_balance + realized_pnl - reserved,
+            available_usd=starting_balance + realized_pnl + reward_usd - reserved,
             open_positions=len(open_positions),
             daily_realized_pnl=daily_realized_pnl,
             rejected_orders=rejected_orders,
@@ -732,7 +742,9 @@ class PortfolioEngine:
         position = self._get_open_position(market_id, strategy_id=strategy_id)
         if not position:
             return PositionAction(market_id=market_id, action="NOOP", reason="Position not open.")
-        pnl = self._compute_pnl(position, exit_price) - self._round_trip_fee(position.size_usd)
+        pnl = self._compute_pnl(position, exit_price) - self._round_trip_fee(
+            position.size_usd, position.entry_price, exit_price
+        )
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
@@ -783,7 +795,7 @@ class PortfolioEngine:
                 )
             position = self._row_to_position(row)
             pnl = self._compute_pnl(position, exit_price) - self._round_trip_fee(
-                position.size_usd
+                position.size_usd, position.entry_price, exit_price
             )
             conn.execute(
                 """
@@ -832,7 +844,9 @@ class PortfolioEngine:
         # Re-express the closed tranche as its own PositionRecord shape so we
         # reuse the same entry_price-based PnL formula.
         closed_tranche = replace(position, size_usd=closed_size)
-        closed_pnl = self._compute_pnl(closed_tranche, exit_price) - self._round_trip_fee(closed_size)
+        closed_pnl = self._compute_pnl(closed_tranche, exit_price) - self._round_trip_fee(
+            closed_size, position.entry_price, exit_price
+        )
         tranche_order_id = f"{position.order_id}-T{current.timestamp():.0f}" if position.order_id else ""
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             # Shrink the open row.
@@ -931,15 +945,26 @@ class PortfolioEngine:
         adjusted = exit_price * (1.0 - self.exit_slippage_bps / 10_000.0)
         return round(max(0.01, min(0.99, adjusted)), 6)
 
-    def _round_trip_fee(self, size_usd: float) -> float:
-        """Round-trip fee on a position of ``size_usd`` at the configured bps.
+    def _round_trip_fee(
+        self,
+        size_usd: float,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+    ) -> float:
+        """Round-trip fee on a position, recognised when the tranche closes.
 
-        Applied at close (both full and partial), so buy+sell fee is recognised
-        when the tranche closes. Units: dollars.
+        With ``taker_fee_rate`` set this is the Polymarket curve applied to
+        both legs at their actual prices (see :mod:`engine.fees` for why
+        both legs are charged as taker); otherwise the legacy flat
+        ``fee_bps`` round-trip. Units: dollars.
         """
-        if self.fee_bps <= 0.0 or size_usd <= 0.0:
-            return 0.0
-        return float(size_usd) * (self.fee_bps / 10_000.0) * 2.0
+        return round_trip_fee_usd(
+            size_usd,
+            entry_price,
+            exit_price,
+            taker_fee_rate=self.taker_fee_rate,
+            flat_fee_bps=self.fee_bps,
+        )
 
     @staticmethod
     def _compute_pnl(position: PositionRecord, exit_price: float) -> float:

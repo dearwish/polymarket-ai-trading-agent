@@ -51,14 +51,25 @@ def check_fill(
     order: PaperMakerOrder,
     ask_yes: float,
     ask_no: float,
+    mode: str = "touch",
 ) -> bool:
     """Return True when the current book would fill ``order`` on a taker
     crossing into our resting price.
 
     We're buying — YES or NO — so a fill happens when the opposite side
-    of the spread (the ask on our token) drops to at-or-below our limit.
+    of the spread (the ask on our token) drops into our limit.
     ``ask > 0`` is required because a zero/missing ask just means the
     book isn't populated yet, not that the order filled.
+
+    ``mode`` selects the fill model (see ``config.paper_maker_fill_mode``):
+
+    - ``"touch"`` — optimistic legacy model: fill when the ask reaches the
+      limit. Ignores queue position; a real order at the touch only fills
+      after everyone resting ahead of it clears, and those fills skew
+      toward adverse moves.
+    - ``"through"`` — conservative: fill only when the ask trades strictly
+      BELOW the limit, i.e. the market moved through our level and a real
+      resting order could not have been skipped.
     """
     if order.side is SuggestedSide.YES:
         ask = ask_yes
@@ -66,7 +77,11 @@ def check_fill(
         ask = ask_no
     else:
         return False
-    return ask > 0.0 and ask <= order.limit_price
+    if ask <= 0.0:
+        return False
+    if mode == "through":
+        return ask < order.limit_price
+    return ask <= order.limit_price
 
 
 def is_expired(order: PaperMakerOrder, now: datetime) -> bool:

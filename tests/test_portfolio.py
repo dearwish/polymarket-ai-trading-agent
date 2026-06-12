@@ -524,3 +524,61 @@ def test_portfolio_isolates_positions_by_strategy(settings) -> None:
     # Per-strategy PnL reflects only that strategy's closed positions.
     assert engine.get_total_realized_pnl(strategy_id="fade") > 0.0
     assert engine.get_total_realized_pnl(strategy_id="adaptive") == 0.0
+
+
+def _open_position(engine: PortfolioEngine, market_id: str = "123", price: float = 0.50, size: float = 10.0) -> None:
+    decision = TradeDecision(
+        market_id=market_id,
+        status=DecisionStatus.APPROVED,
+        side=SuggestedSide.YES,
+        size_usd=size,
+        limit_price=price,
+        rationale=["approved"],
+        rejected_by=[],
+    )
+    result = ExecutionResult(
+        market_id=market_id,
+        success=True,
+        mode=ExecutionMode.PAPER,
+        order_id=f"paper-{market_id}",
+        status="FILLED_PAPER",
+        detail="ok",
+        fill_price=price,
+    )
+    engine.record_execution(decision, result)
+
+
+def test_close_applies_polymarket_fee_curve(settings) -> None:
+    """With ``taker_fee_rate`` set, realized PnL is reduced by the curve
+    fee on both legs: shares × rate × p × (1 − p) at each leg's price."""
+    engine = PortfolioEngine(
+        settings.db_path,
+        settings.paper_starting_balance_usd,
+        taker_fee_rate=0.07,
+    )
+    _open_position(engine, price=0.50, size=10.0)
+    engine.close_position("123", exit_price=0.60, reason="ttl_expired")
+    closed = engine.list_closed_positions(limit=1)[0]
+    shares = 10.0 / 0.50
+    gross = (0.60 - 0.50) * shares
+    fees = shares * 0.07 * 0.50 * 0.50 + shares * 0.07 * 0.60 * 0.40
+    assert abs(closed.realized_pnl - (gross - fees)) < 1e-9
+
+
+def test_account_state_credits_reward_accruals(settings) -> None:
+    """MM reward accruals are real income and must be credited to the
+    account's available balance (2026-06-12 audit fix)."""
+    engine = PortfolioEngine(settings.db_path, settings.paper_starting_balance_usd)
+    base = engine.get_account_state(ExecutionMode.PAPER).available_usd
+    engine.record_reward_accrual(
+        strategy_id="market_maker",
+        market_id="mm-1",
+        side="YES",
+        amount_usd=1.25,
+        period_seconds=60.0,
+    )
+    after = engine.get_account_state(ExecutionMode.PAPER, strategy_id="market_maker").available_usd
+    default_after = engine.get_account_state(ExecutionMode.PAPER).available_usd
+    # Both the strategy-scoped and the cross-strategy views credit the accrual.
+    assert abs(after - (base + 1.25)) < 1e-9
+    assert abs(default_after - (base + 1.25)) < 1e-9

@@ -79,6 +79,11 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     # paper-maker lifecycle (resting limit, TTL, hysteresis) — the
     # paper-mode equivalent of live_post_only=GTC.
     "fade_post_only": False,
+    # 2026-06-12 audit (docs/MORNING_REPORT_2026-06-12.md): fade had negative
+    # expectancy in every soak week (−$35.54 / 1123 trades, payoff 0.50 at a
+    # 63% win rate) and its drift signal only "works" inverted — i.e. it is
+    # fitted noise. Disabled until a strategy passes docs/GO_NO_GO.md.
+    "fade_enabled": False,
     # Penny-buy strategy defaults (from 8h backtest sweep, 2026-04-23):
     # entry_thresh=0.03 + TTE≥300s + TP=2x produced 63.6% hit, +46% ROI
     # on n=11 trades. Paper mode, parallel to fade + adaptive.
@@ -86,7 +91,9 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     # after empirical failure). Off by default — toggle via dashboard only
     # to seed a new adaptive variant experiment.
     "adaptive_enabled": False,
-    "penny_enabled": True,
+    # 2026-06-12 audit: every cell of the 36-config penny backtest sweep was
+    # negative (scripts/_bt_*.md); production baseline −$28.32 / 218 trades.
+    "penny_enabled": False,
     "penny_entry_thresh": 0.03,
     "penny_min_entry_tte_seconds": 300,
     "penny_force_exit_tte_seconds": 120,
@@ -106,7 +113,10 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     # 2%+ faster than BTC justifies); sensitivity 10 = a 1% BTC move is
     # "expected" to move mid 10 percentage points, calibrated roughly
     # from the GBM derivative at a 0.5-mid 5-min market.
-    "adaptive_v2_enabled": True,
+    # 2026-06-12 audit: −$22.75 / 226 trades live, signal runs inverted
+    # (continuation, after the reversion thesis lost), sensitivity=10 is an
+    # uncalibrated theoretical constant. Disabled pending docs/GO_NO_GO.md.
+    "adaptive_v2_enabled": False,
     "adaptive_v2_overreaction_threshold": 0.02,
     "adaptive_v2_sensitivity": 10.0,
     "adaptive_v2_cost_floor": 0.005,
@@ -164,6 +174,14 @@ INITIAL_SETTINGS_BASELINE: dict[str, Any] = {
     # on, so this default doesn't affect non-MM soaks.
     "mm_universe_require_size_eligible": True,
     "fee_bps": 0.0,
+    # Polymarket Fee Structure V2 (2026-03-30): taker fee per leg is
+    # shares × rate × p × (1 − p); crypto rate is 0.07. Paper PnL was
+    # previously simulated fee-free (fee_bps=0) which inflated every soak
+    # result — see docs/MORNING_REPORT_2026-06-12.md §5-6.
+    "fee_taker_rate": 0.07,
+    # Conservative maker-fill model: a resting paper limit only fills when
+    # the ask trades strictly through it (see config.paper_maker_fill_mode).
+    "paper_maker_fill_mode": "through",
     # --- Quant scorer gates ---
     "quant_invert_drift": True,
     "quant_drift_damping": 0.5,

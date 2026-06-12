@@ -165,6 +165,15 @@ class Settings(BaseSettings):
     # BTC Up/Down markets — revisit after the first trending-regime soak.
     paper_follow_limit_discount_bps: float = 50.0
     paper_follow_maker_ttl_seconds: int = 300
+    # How a resting paper-maker order decides it filled. "touch" = the old
+    # optimistic model: fill the instant the ask reaches the limit (ignores
+    # queue position — real fills at the touch require everyone ahead of us
+    # to clear first). "through" = conservative: only count a fill when the
+    # ask trades strictly THROUGH the limit, which a real resting order at
+    # the level could not have missed. The 2026-05 penny backtest family
+    # (scripts/_bt_maker_*.md) showed touch-model PnL is materially inflated
+    # vs through; the 2026-06-12 audit made "through" the default.
+    paper_maker_fill_mode: str = "through"
     # Maker-yield selection (Tier 2 from gamma-trade-lab reference, 2026-04):
     # gate cancel/replace on material drift so the follow-maker path can
     # track a moving mid without churning on every tick. Both thresholds
@@ -178,6 +187,12 @@ class Settings(BaseSettings):
     # 1-lot levels when computing best-bid/best-ask — prevents the paper
     # maker from posting behind a phantom order. 0.0 disables (raw mid).
     paper_follow_min_level_size_shares: float = 0.0
+    # Master gate for the legacy GBM-fade scorer (strategy_id="fade"). It was
+    # historically always-on as the default strategy slot; the 2026-06-12
+    # audit (docs/MORNING_REPORT_2026-06-12.md) found it had negative
+    # expectancy across every soak week (−$35.54 / 1123 trades), so it can
+    # now be disabled like every other strategy.
+    fade_enabled: bool = True
     # Route the fade scorer's BUY assessments through the paper-maker
     # lifecycle (resting limit at mid − ``paper_follow_limit_discount_bps``,
     # TTL ``paper_follow_maker_ttl_seconds``) instead of the immediate
@@ -418,6 +433,14 @@ class Settings(BaseSettings):
     mm_universe_require_size_eligible: bool = True
 
     fee_bps: float = 0.0
+    # Polymarket taker-fee curve (Fee Structure V2, 2026-03-30): per-leg fee
+    # is shares × rate × p × (1 − p), taker-only, makers pay zero. Crypto is
+    # the highest-fee category at 0.07 (~1.75¢/share at p=0.5, ≈3.5% of the
+    # premium spent at mid prices). When > 0 this REPLACES the legacy flat
+    # ``fee_bps`` in paper PnL accounting and is folded into the scorers'
+    # pre-trade edge cost. Set 0 to fall back to the flat model. Live fills
+    # must read the per-market ``feeSchedule`` from the CLOB API instead.
+    fee_taker_rate: float = 0.07
     execution_maker_min_edge: float = 0.04
     execution_maker_min_tte_seconds: int = 120
     execution_price_tick: float = 0.01
@@ -1103,11 +1126,29 @@ EDITABLE_SETTINGS_METADATA: dict[str, dict[str, Any]] = {
         "group": "thresholds",
     },
     "fee_bps": {
-        "label": "Fee BPS",
+        "label": "Fee BPS (legacy flat, used when curve rate = 0)",
         "type": "number",
         "min": 0,
         "max": 10000,
         "step": 0.1,
+        "group": "paper",
+    },
+    "fee_taker_rate": {
+        "label": "Taker Fee Rate (Polymarket curve: rate × p(1−p)/share)",
+        "type": "number",
+        "min": 0,
+        "max": 0.2,
+        "step": 0.005,
+        "group": "paper",
+    },
+    "fade_enabled": {
+        "label": "Fade (GBM drift) Enabled",
+        "type": "boolean",
+        "group": "paper",
+    },
+    "paper_maker_fill_mode": {
+        "label": "Paper Maker Fill Model (touch | through)",
+        "type": "text",
         "group": "paper",
     },
     # Quant scorer gates
