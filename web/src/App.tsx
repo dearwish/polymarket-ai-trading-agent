@@ -21,6 +21,7 @@ type LivePosition = {
   realized_pnl_usd: number;
   total_pnl_usd: number;
   end_date: string;
+  is_settled?: boolean;
   icon: string;
 };
 
@@ -35,6 +36,8 @@ type LivePositionsPayload = {
     total_cost_usd: number;
     total_current_value_usd: number;
     total_cash_pnl_usd: number;
+    settled_unredeemed_count?: number;
+    settled_unredeemed_pnl_usd?: number;
     closed_realized_pnl_usd: number;
   };
 };
@@ -3429,29 +3432,15 @@ function EventSmartMoneyPage() {
 
 function LivePortfolioPage({
   liveOrders,
+  liveTrades,
   livePositions,
-  onForceRefresh,
 }: {
   liveOrders: LiveOrder[];
+  liveTrades: LiveTrade[];
   livePositions: LivePositionsPayload | null;
-  onForceRefresh: () => Promise<void>;
 }) {
-  // Positions now arrive via the shared dashboard SSE stream (live_positions
-  // event, server-side cached at 30s TTL). The page is a pure consumer —
-  // no local fetching, no polling. The manual refresh button triggers the
-  // full dashboard refresh which forces the server cache to refill on its
-  // next 30s tick.
   const data = livePositions;
-  const [refreshing, setRefreshing] = useState<boolean>(false);
   const error = (livePositions as { error?: string } | null)?.error ?? null;
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    try {
-      await onForceRefresh();
-    } finally {
-      setRefreshing(false);
-    }
-  };
 
   const summary = data?.summary;
   const positions = useMemo(() => {
@@ -3471,12 +3460,22 @@ function LivePortfolioPage({
     });
   }, [liveOrders]);
   const NOW_MS = Date.now();
+  let activeCount = 0;
+  let settledCount = 0;
+  for (const p of positions) {
+    const endMs = p.end_date ? Date.parse(p.end_date) : NaN;
+    if (Number.isFinite(endMs) && endMs < NOW_MS) settledCount++;
+    else activeCount++;
+  }
 
-  // Net total P&L: unrealised (cash_pnl from currently-open) + realised
-  // from already-resolved markets. The Polymarket UI seems to only show
+  // Net total P&L: unrealised (cash_pnl from currently-open) + settled
+  // markets we haven't redeemed yet (locked-in loss/gain) + realised
+  // from already-redeemed markets. The Polymarket UI seems to only show
   // unrealized; combining gives the operator the full picture.
+  const settledUnredeemedPnl = summary?.settled_unredeemed_pnl_usd ?? 0;
+  const settledUnredeemedCount = summary?.settled_unredeemed_count ?? 0;
   const lifetimePnl = summary
-    ? summary.total_cash_pnl_usd + summary.closed_realized_pnl_usd
+    ? summary.total_cash_pnl_usd + settledUnredeemedPnl + summary.closed_realized_pnl_usd
     : 0;
 
   return (
@@ -3498,11 +3497,6 @@ function LivePortfolioPage({
             </p>
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.3em" }}>
-            <button type="button" className="refresh-button"
-                    onClick={() => void handleRefresh()}
-                    disabled={refreshing}>
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </button>
             <span className="muted" style={{ fontSize: "0.75em" }}>
               streamed · server cache 30s
             </span>
@@ -3514,7 +3508,10 @@ function LivePortfolioPage({
 
         {summary && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "0.75em", marginTop: "1em" }}>
-            <SummaryTile label="Open positions" value={summary.count.toString()} />
+            <SummaryTile
+              label="Open positions"
+              value={settledCount > 0 ? `${activeCount} + ${settledCount} settled` : activeCount.toString()}
+            />
             <SummaryTile label="Deployed cost" value={`$${summary.total_cost_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
             <SummaryTile label="Current value" value={`$${summary.total_current_value_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
             <SummaryTile
@@ -3522,6 +3519,13 @@ function LivePortfolioPage({
               value={`${summary.total_cash_pnl_usd >= 0 ? "+" : ""}$${summary.total_cash_pnl_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               tone={summary.total_cash_pnl_usd >= 0 ? "positive" : "negative"}
             />
+            {settledUnredeemedCount > 0 && (
+              <SummaryTile
+                label={`Settled · unredeemed (${settledUnredeemedCount})`}
+                value={`${settledUnredeemedPnl >= 0 ? "+" : ""}$${settledUnredeemedPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                tone={settledUnredeemedPnl >= 0 ? "positive" : "negative"}
+              />
+            )}
             <SummaryTile
               label="Closed realised"
               value={`${summary.closed_realized_pnl_usd >= 0 ? "+" : ""}$${summary.closed_realized_pnl_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
@@ -3538,10 +3542,14 @@ function LivePortfolioPage({
 
       <article className="card">
         <header className="card-header">
-          <h2>Open positions · {positions.length}</h2>
+          <h2>
+            Open positions · {activeCount} active
+            {settledCount > 0 && ` + ${settledCount} settled`}
+          </h2>
           {positions.length > 0 && (
             <span className="muted" style={{ fontSize: "0.85em" }}>
               held YES/NO tokens with non-trivial size
+              {settledCount > 0 && " · settled rows are greyed out (event ended, no longer actionable)"}
             </span>
           )}
         </header>
@@ -3737,6 +3745,94 @@ function LivePortfolioPage({
                     </tr>
                   );
                 })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </article>
+
+      <article className="card">
+        <header className="card-header">
+          <h2>Recent fills · {liveTrades.length}</h2>
+          {liveTrades.length > 0 && (
+            <span className="muted" style={{ fontSize: "0.85em" }}>
+              wallet-level CLOB fills · sorted newest first
+            </span>
+          )}
+        </header>
+        {liveTrades.length === 0 ? (
+          <p className="muted">No recent fills on this wallet.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Market</th>
+                  <th>Side</th>
+                  <th style={{ textAlign: "right" }}>Size</th>
+                  <th style={{ textAlign: "right" }}>Price</th>
+                  <th style={{ textAlign: "right" }}>Value</th>
+                  <th>Status</th>
+                  <th>Filled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...liveTrades]
+                  .sort((a, b) => {
+                    const ta = a.created_at ? Date.parse(a.created_at) || Number(a.created_at) * 1000 : 0;
+                    const tb = b.created_at ? Date.parse(b.created_at) || Number(b.created_at) * 1000 : 0;
+                    return tb - ta;
+                  })
+                  .map((t) => {
+                    const matchedPos = positions.find((p) => p.asset === t.asset_id);
+                    const cidMeta = t.market_id ? data?.condition_meta?.[t.market_id] : undefined;
+                    const optionTitle = matchedPos?.option_title || cidMeta?.option_title || "";
+                    const eventTitle = matchedPos?.event_title || cidMeta?.event_title || matchedPos?.title || "";
+                    let filledDisplay = "—";
+                    if (t.created_at) {
+                      const epoch = Number(t.created_at);
+                      const ts = Number.isFinite(epoch) && epoch > 0 ? epoch * 1000 : Date.parse(t.created_at);
+                      if (Number.isFinite(ts)) {
+                        filledDisplay = new Date(ts).toISOString().slice(0, 19).replace("T", " ");
+                      }
+                    }
+                    const size = typeof t.size === "number" ? t.size : 0;
+                    const price = typeof t.price === "number" ? t.price : null;
+                    const value = price !== null ? size * price : null;
+                    const sideLabel = (t.side ?? "").toUpperCase();
+                    const sideClass = sideLabel === "BUY" ? "positive" : sideLabel === "SELL" ? "negative" : "";
+                    return (
+                      <tr key={t.trade_id}>
+                        <td>
+                          {optionTitle ? (
+                            <div style={{ fontWeight: 600 }}>{optionTitle}</div>
+                          ) : (
+                            <div className="muted" style={{ fontSize: "0.85em" }}>
+                              <code>{(t.market_id ?? "").slice(0, 12)}…</code>
+                            </div>
+                          )}
+                          {eventTitle && eventTitle !== optionTitle && (
+                            <div className="muted" style={{ fontSize: "0.85em" }}>{eventTitle}</div>
+                          )}
+                        </td>
+                        <td>
+                          <span className={`pill ${sideClass}`}
+                                style={{ padding: "0.1em 0.5em", fontSize: "0.85em" }}>
+                            {sideLabel || "—"}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: "right" }}>{size.toFixed(2)}</td>
+                        <td style={{ textAlign: "right" }}>
+                          {price !== null ? `${(price * 100).toFixed(1)}¢` : "—"}
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {value !== null ? formatMoney(value) : "—"}
+                        </td>
+                        <td className="muted">{t.status || "—"}</td>
+                        <td className="muted" style={{ whiteSpace: "nowrap", fontSize: "12px" }}>{filledDisplay}</td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>
@@ -4509,8 +4605,8 @@ export default function App() {
         return (
           <LivePortfolioPage
             liveOrders={state.liveOrders}
+            liveTrades={state.liveTrades}
             livePositions={state.livePositions}
-            onForceRefresh={refreshDashboard}
           />
         );
       case "settings":

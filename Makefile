@@ -13,6 +13,7 @@ INTERVAL ?= 15
 	simulate-active simulate-market simulate-loop-active simulate-loop-market \
 	daemon daemon-smoke \
 	analyze-soak \
+	event-smart-money-snapshot event-smart-money-report \
 	guard-market-id
 
 $(BIN)/python:
@@ -47,7 +48,7 @@ doctor: install
 	$(CLI) doctor --active
 
 api-dev: install
-	$(BIN)/uvicorn polymarket_trading_engine.apps.api.main:app --host 127.0.0.1 --port 8000 --reload
+	$(BIN)/uvicorn polymarket_trading_engine.apps.api.main:app --host 127.0.0.1 --port 8011 --reload
 
 web-install:
 	cd web && npm install
@@ -139,6 +140,12 @@ heartbeat: install
 analyze-soak: install
 	$(BIN)/python scripts/analyze_soak.py
 
+event-smart-money-snapshot: install
+	$(BIN)/python scripts/event_smart_money_forward_test.py --mode snapshot --end-within-days 60
+
+event-smart-money-report: install
+	$(BIN)/python scripts/event_smart_money_forward_test.py --mode report
+
 help:
 	@printf '%s\n' \
 		'Available targets:' \
@@ -151,7 +158,7 @@ help:
 		'  make status                   Run the CLI status command' \
 		'  make auth-check               Run the CLI auth-check command' \
 		'  make doctor                   Run the combined read-only account/market/simulation diagnostic' \
-		'  make api-dev                  Run the FastAPI operator backend on http://127.0.0.1:8000' \
+		'  make api-dev                  Run the FastAPI operator backend on http://127.0.0.1:8011' \
 		'  make web-install              Install the React dashboard dependencies' \
 		'  make web-dev                  Run the React dashboard on http://127.0.0.1:5180' \
 		'  make web-build                Build the React dashboard for production' \
@@ -178,6 +185,10 @@ help:
 		'  make daemon                   Run the event-driven market-data daemon (Phase 1)' \
 		'  make daemon-smoke             Run the daemon for 15s to smoke-test websocket plumbing' \
 	'  make analyze-soak             Analyze daemon_tick journal against resolved market outcomes' \
+		'  make event-smart-money-snapshot' \
+		'                               Daily 7am cron: snapshot event smart-money for events ending within 60d' \
+		'  make event-smart-money-report' \
+		'                               Report hit rate + payoff from snapshot archive' \
 		'' \
 		'Variables:' \
 		'  PYTHON      Python executable to use (default: python3)' \

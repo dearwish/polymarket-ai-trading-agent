@@ -540,10 +540,12 @@ def create_app(
         without going through the HTTPException path."""
         import urllib.request as _urllib
         import urllib.parse as _urlparse
+        import datetime as _dt
         funder = (settings.polymarket_funder or "").strip().lower()
         empty_payload = {"wallet": "", "positions": [], "condition_meta": {}, "summary": {
             "count": 0, "total_cost_usd": 0.0,
             "total_current_value_usd": 0.0, "total_cash_pnl_usd": 0.0,
+            "settled_unredeemed_count": 0, "settled_unredeemed_pnl_usd": 0.0,
             "closed_realized_pnl_usd": 0.0,
         }}
         if not funder:
@@ -587,6 +589,9 @@ def create_app(
         total_cost = 0.0
         total_current = 0.0
         total_cash_pnl = 0.0
+        settled_count = 0
+        settled_pnl = 0.0
+        now_utc = _dt.datetime.now(_dt.timezone.utc)
         for p in raw:
             size = float(p.get("size") or 0)
             if size < size_threshold:
@@ -596,9 +601,28 @@ def create_app(
             cost = size * avg_price
             current_value = float(p.get("currentValue") or (size * cur_price))
             cash_pnl = float(p.get("cashPnl") or (current_value - cost))
-            total_cost += cost
-            total_current += current_value
-            total_cash_pnl += cash_pnl
+            end_date = p.get("endDate", "") or ""
+            # Market is settled (resolved) once its end date has passed. The
+            # P&L is effectively realised at that point even if the operator
+            # hasn't redeemed yet — Polymarket leaves it in /positions until
+            # then. Excluding settled positions from the unrealised rollup
+            # avoids double-counting against an unredeemed loss/gain.
+            is_settled = False
+            if end_date:
+                try:
+                    end_dt = _dt.datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=_dt.timezone.utc)
+                    is_settled = end_dt < now_utc
+                except (ValueError, TypeError):
+                    pass
+            if is_settled:
+                settled_count += 1
+                settled_pnl += cash_pnl
+            else:
+                total_cost += cost
+                total_current += current_value
+                total_cash_pnl += cash_pnl
             cid = str(p.get("conditionId") or "")
             raw_outcome = str(p.get("outcome", ""))
             option_title = option_title_by_cid.get(cid, "")
@@ -622,7 +646,8 @@ def create_app(
                 "cash_pnl_usd": cash_pnl,
                 "realized_pnl_usd": float(p.get("realizedPnl") or 0),
                 "total_pnl_usd": float(p.get("totalPnl") or (cash_pnl + float(p.get("realizedPnl") or 0))),
-                "end_date": p.get("endDate", ""),
+                "end_date": end_date,
+                "is_settled": is_settled,
                 "icon": p.get("icon", ""),
             })
         closed_pnl = 0.0
@@ -651,6 +676,8 @@ def create_app(
                 "total_cost_usd": round(total_cost, 2),
                 "total_current_value_usd": round(total_current, 2),
                 "total_cash_pnl_usd": round(total_cash_pnl, 2),
+                "settled_unredeemed_count": settled_count,
+                "settled_unredeemed_pnl_usd": round(settled_pnl, 2),
                 "closed_realized_pnl_usd": round(closed_pnl, 2),
             },
         }
@@ -1301,4 +1328,4 @@ app = create_app()
 
 
 def run() -> None:
-    uvicorn.run("polymarket_trading_engine.apps.api.main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("polymarket_trading_engine.apps.api.main:app", host="127.0.0.1", port=8011, reload=False)

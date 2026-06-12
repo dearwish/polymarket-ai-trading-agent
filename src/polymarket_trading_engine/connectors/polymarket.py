@@ -346,7 +346,8 @@ class PolymarketConnector:
         client = self._build_authed_live_client()
         params = TradeParams(market=market_id) if market_id else TradeParams()
         trades = client.get_trades(params)
-        return [self._normalize_live_trade(trade) for trade in trades[:limit]]
+        user_address = (self.settings.polymarket_funder or "").strip().lower() or None
+        return [self._normalize_live_trade(trade, user_address=user_address) for trade in trades[:limit]]
 
     def list_market_trades(self, market_id: str, limit: int = 20) -> list[dict[str, Any]]:
         response = self.client.get(
@@ -811,20 +812,46 @@ class PolymarketConnector:
         }
 
     @staticmethod
-    def _normalize_live_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_live_trade(trade: dict[str, Any], user_address: str | None = None) -> dict[str, Any]:
         if not isinstance(trade, dict):
             return {"raw": trade}
+        # Polymarket's CLOB returns one row per match; the top-level
+        # side/size/price/asset_id describe the TAKER. When our wallet was
+        # the maker on this trade (``trader_side == "MAKER"``), the
+        # taker-view fields are misleading — they describe the counterparty.
+        # Override them with the maker_orders[] entry whose maker_address
+        # matches our funder so the row shows what we actually filled.
+        trader_side = str(trade.get("trader_side") or "").upper()
+        side = trade.get("side")
+        size = trade.get("size") or trade.get("quantity")
+        price = trade.get("price") or trade.get("avgPrice")
+        asset_id = trade.get("asset_id") or trade.get("token_id")
+        order_id = trade.get("order_id") or trade.get("orderID") or trade.get("orderId") or ""
+        if user_address and trader_side == "MAKER":
+            for maker in trade.get("maker_orders", []) or []:
+                if str(maker.get("maker_address") or "").lower() != user_address:
+                    continue
+                side = maker.get("side") or side
+                size = maker.get("matched_amount") or size
+                price = maker.get("price") or price
+                asset_id = maker.get("asset_id") or asset_id
+                order_id = maker.get("order_id") or order_id
+                break
+        # match_time is a Unix-epoch string; promote it to created_at when
+        # the top-level created_at isn't populated (which is the common case
+        # for the maker-side payload).
+        created_at = trade.get("created_at") or trade.get("createdAt") or trade.get("match_time") or ""
         return {
             "trade_id": str(trade.get("id") or trade.get("tradeID") or trade.get("tradeId") or ""),
-            "order_id": str(trade.get("order_id") or trade.get("orderID") or trade.get("orderId") or ""),
+            "order_id": str(order_id),
             "market_id": str(trade.get("market") or trade.get("market_id") or trade.get("condition_id") or ""),
-            "asset_id": str(trade.get("asset_id") or trade.get("token_id") or ""),
+            "asset_id": str(asset_id or ""),
             "status": str(trade.get("status") or trade.get("state") or ""),
-            "side": str(trade.get("side") or ""),
-            "price": PolymarketConnector._coerce_float(trade.get("price") or trade.get("avgPrice")),
-            "size": PolymarketConnector._coerce_float(trade.get("size") or trade.get("quantity")),
+            "side": str(side or ""),
+            "price": PolymarketConnector._coerce_float(price),
+            "size": PolymarketConnector._coerce_float(size),
             "amount": PolymarketConnector._coerce_float(trade.get("amount") or trade.get("usdc_size")),
-            "created_at": str(trade.get("created_at") or trade.get("createdAt") or ""),
+            "created_at": str(created_at),
             "raw": trade,
         }
 
