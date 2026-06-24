@@ -16,3 +16,16 @@ web/*.tsbuildinfo
 .DS_Store
 logs/
 data/
+
+# Local backtest / analysis scratch output — the .py generators stay tracked,
+# their generated reports/caches/trade dumps do not.
+scripts/_*
+scripts/*_backtest.md
+scripts/*_backtest_trades.jsonl
+scripts/*_backtest_report.md
+scripts/penny_pattern_mining*.md
+scripts/copy_mirror_sim.md
+scripts/copy_wallet_discovery.csv
+scripts/copy_wallet_discovery_report.md
+scripts/event_smart_money_eurovision*.md
+scripts/event_smart_money_peru*.md
