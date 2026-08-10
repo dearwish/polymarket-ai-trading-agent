@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from polymarket_trading_engine.config import Settings
+from polymarket_trading_engine.engine.fees import taker_fee_price_units
 from polymarket_trading_engine.types import EvidencePacket, MarketAssessment, SuggestedSide
 
 
@@ -198,8 +199,15 @@ class QuantScoringEngine:
         slippage_bps = self._slippage_bps(packet)
         fee_bps = float(self.settings.fee_bps)
         cost = (slippage_bps + fee_bps) / 10_000.0
-        edge_yes = fair_yes - ask_yes - cost
-        edge_no = (1.0 - fair_yes) - ask_no - cost
+        # Polymarket taker-fee curve (rate × p(1−p) per share, price units):
+        # price-dependent, so each side carries its own fee at its own ask.
+        # Worst exactly where these markets trade (p ≈ 0.5 → ~1.75¢/share at
+        # the 0.07 crypto rate) — an edge that doesn't clear it isn't an edge.
+        fee_rate = float(getattr(self.settings, "fee_taker_rate", 0.0))
+        fee_yes = taker_fee_price_units(ask_yes, fee_rate)
+        fee_no = taker_fee_price_units(ask_no, fee_rate)
+        edge_yes = fair_yes - ask_yes - cost - fee_yes
+        edge_no = (1.0 - fair_yes) - ask_no - cost - fee_no
         return EdgeBreakdown(
             fair_yes=fair_yes,
             ask_yes=ask_yes,

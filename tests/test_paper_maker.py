@@ -41,6 +41,18 @@ def test_check_fill_yes_triggers_when_ask_crosses() -> None:
     assert check_fill(order, ask_yes=0.60, ask_no=0.40) is True
 
 
+def test_check_fill_through_mode_requires_trade_through() -> None:
+    """Under the conservative "through" model a touch (ask == limit) is not
+    a fill — queue position means real touch-fills are optimistic — but a
+    strictly lower ask is.
+    """
+    order = _yes_order(limit=0.68)
+    assert check_fill(order, ask_yes=0.68, ask_no=0.32, mode="through") is False
+    assert check_fill(order, ask_yes=0.67, ask_no=0.33, mode="through") is True
+    # Empty book is still no-fill in either mode.
+    assert check_fill(order, ask_yes=0.0, ask_no=0.0, mode="through") is False
+
+
 def test_check_fill_no_side_uses_no_ask() -> None:
     """A NO buy's fill is decided by the NO side's ask, not the YES side's."""
     order = PaperMakerOrder(

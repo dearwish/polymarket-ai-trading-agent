@@ -226,8 +226,10 @@ def test_handler_records_fill_when_ask_crosses_yes_limit(tmp_path: Path) -> None
     assert yes_key in runner._pending_mm_orders
     yes_limit = runner._pending_mm_orders[yes_key].limit_price  # 0.50
 
-    # Now an aggressive seller drops the YES ask down to our resting bid.
-    _seed_book(state, bid=0.48, ask=yes_limit)  # ask now == our limit → fill
+    # An aggressive seller drops the YES ask strictly THROUGH our resting
+    # bid — under the default "through" fill model a touch (ask == limit)
+    # is not enough (queue position), the level must trade through.
+    _seed_book(state, bid=0.47, ask=yes_limit - 0.01)
     asyncio.run(runner._handle_market_maker_strategy(_context(runner, candidate, state)))
 
     # The YES leg must have been filled and recorded as an open YES position.
@@ -266,9 +268,10 @@ def test_handler_skews_quotes_after_yes_fill(tmp_path: Path) -> None:
     initial_yes = runner._pending_mm_orders[yes_key].limit_price
     initial_no = runner._pending_mm_orders[no_key].limit_price
 
-    # Cross our YES bid → fill it. Reset book to original mid for tick 3 so
-    # only inventory drives the new quote (not a mid shift).
-    _seed_book(state, bid=0.48, ask=initial_yes)
+    # Cross our YES bid (strictly through, per the default fill model) →
+    # fill it. Reset book to original mid for tick 3 so only inventory
+    # drives the new quote (not a mid shift).
+    _seed_book(state, bid=0.47, ask=initial_yes - 0.01)
     asyncio.run(runner._handle_market_maker_strategy(_context(runner, candidate, state)))
     _seed_book(state, bid=0.50, ask=0.54)
     # Force replacement by widening hysteresis-bypassing settings so even
@@ -361,7 +364,7 @@ def test_handler_force_exits_open_legs_inside_tte_buffer(tmp_path: Path) -> None
     asyncio.run(runner._handle_market_maker_strategy(_context(runner, candidate, state)))
     yes_key = ("market_maker", candidate.market_id, "YES")
     yes_limit = runner._pending_mm_orders[yes_key].limit_price
-    _seed_book(state, bid=0.48, ask=yes_limit)
+    _seed_book(state, bid=0.47, ask=yes_limit - 0.01)
     asyncio.run(runner._handle_market_maker_strategy(_context(runner, candidate, state)))
     assert len(service.portfolio.list_open_positions(strategy_id="market_maker")) == 1
 

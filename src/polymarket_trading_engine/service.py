@@ -61,6 +61,7 @@ class AgentService:
             settings.paper_starting_balance_usd,
             exit_slippage_bps=settings.paper_exit_slippage_bps,
             fee_bps=settings.fee_bps,
+            taker_fee_rate=settings.fee_taker_rate,
             settings=settings,
         )
         self.settings_store = SettingsStore(settings.db_path)

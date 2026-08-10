@@ -8,7 +8,7 @@ Event-driven Polymarket trading system. Multi-strategy by design — short-horiz
 
 ## Current Status
 
-Production paper-trading system with 328 tests. Works end-to-end: WebSocket discovery → quant scoring → risk gating → paper execution → position tracking → dashboard.
+Production paper-trading system with 591 tests. Works end-to-end: WebSocket discovery → quant scoring → risk gating → paper execution → position tracking → dashboard.
 
 - Python package under `src/polymarket_trading_engine`
 - operator CLI via `polymarket-trading-engine`
@@ -33,7 +33,8 @@ Production paper-trading system with 328 tests. Works end-to-end: WebSocket disc
 - **daemon auto paper execution** (opt-in) — set `DAEMON_AUTO_PAPER_EXECUTE=true` in `.env` and the daemon's decision callback routes every APPROVED signal through the real risk → execute → portfolio pipeline, so simulated trades accumulate in the Portfolio tab and `positions` DB table without a separate CLI runner. Open positions run through the full TP-ladder / trailing-stop / fixed-SL / force-exit / TTE-buffer ladder described in [Position Lifecycle (Paper)](#position-lifecycle-paper). Safe by default: disabled unless explicitly set.
 - **DB-owned runtime settings + live reload** — every operator-tunable parameter lives in SQLite (`settings_changes` table) with an append-only audit log; the daemon picks up edits within ~2 s with no restart. Seeded on first boot from a code-defined baseline; `.env` is now deploy-time only. See [Runtime Settings & Migrations](#runtime-settings--migrations).
 - **Python schema migrations framework** — Knex-style `migrations/` folder of `YYYYMMDDTHHMMSS-<slug>.py` files; every service boot applies anything not yet in the `migrations` table. Owns all DB schema (positions, order_attempts, live_orders, reports, settings_changes).
-- test suite covering connectors, scoring, risk, execution, service, CLI, state/daemon/feed modules, the execution router and VWAP fills, live fill bridging, the live close flow, per-family risk profiles, btc_15m discovery, journal retention, heartbeats, `/api/metrics`/`/api/healthz`, daemon kill-switch gating, slug-prediction discovery for 5m/15m/1h families, daemon paper-execute lifecycle, and the migrations / settings-store / live-reload paths — **328 tests**
+- **2026-06-12 audit** — every directional strategy (fade, adaptive_v2, penny) is disabled pending the pre-registered gates in `docs/GO_NO_GO.md`; paper accounting now charges the Polymarket taker-fee curve (`engine/fees.py`, `fee_taker_rate=0.07` — shares × rate × p(1−p) per leg) instead of trading fee-free, paper maker fills use the conservative trade-through model (`paper_maker_fill_mode="through"`), and MM reward accruals are credited to the account balance. Full findings and the go/no-go plan: `docs/MORNING_REPORT_2026-06-12.md`.
+- test suite covering connectors, scoring, risk, execution, service, CLI, state/daemon/feed modules, the execution router and VWAP fills, live fill bridging, the live close flow, per-family risk profiles, btc_15m discovery, journal retention, heartbeats, `/api/metrics`/`/api/healthz`, daemon kill-switch gating, slug-prediction discovery for 5m/15m/1h families, daemon paper-execute lifecycle, and the migrations / settings-store / live-reload paths — **591 tests**
 
 Important:
 

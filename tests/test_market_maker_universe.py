@@ -141,6 +141,13 @@ def test_strategies_have_universe_filters_when_mm_universe_on(tmp_path: Path) ->
     assert by_id["market_maker"].universe_filter is not None
 
 
+def test_fade_strategy_can_be_disabled(tmp_path: Path) -> None:
+    """``fade_enabled=False`` must drop the legacy default strategy slot
+    (2026-06-12 audit: fade is disabled until it passes docs/GO_NO_GO.md)."""
+    runner, _ = _build_runner(tmp_path, fade_enabled=False)
+    assert "fade" not in {s.strategy_id for s in runner._strategies}
+
+
 def test_strategies_have_no_filters_when_mm_universe_off(tmp_path: Path) -> None:
     """Legacy mode: every strategy runs on every market. Both filters None."""
     runner, _ = _build_runner(tmp_path, mm_enabled=True, mm_universe_enabled=False)

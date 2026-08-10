@@ -23,6 +23,7 @@ from polymarket_trading_engine.engine.adaptive_scoring import (
 )
 from polymarket_trading_engine.engine.btc_state import BtcSnapshot, BtcState
 from polymarket_trading_engine.engine.execution.book_utils import first_level_with_size
+from polymarket_trading_engine.engine.fees import round_trip_fee_usd
 from polymarket_trading_engine.engine.execution.paper_maker import (
     PaperMakerOrder,
     check_fill,
@@ -1120,13 +1121,14 @@ class DaemonRunner:
             mm_filter = None
             btc_filter = None
 
-        configs.append(
-            StrategyConfig(
-                strategy_id=_DEFAULT_STRATEGY_ID,
-                scorer=self.quant,
-                universe_filter=btc_filter,
+        if settings.fade_enabled:
+            configs.append(
+                StrategyConfig(
+                    strategy_id=_DEFAULT_STRATEGY_ID,
+                    scorer=self.quant,
+                    universe_filter=btc_filter,
+                )
             )
-        )
         if settings.adaptive_enabled:
             configs.append(
                 StrategyConfig(
@@ -1774,8 +1776,14 @@ class DaemonRunner:
         entry_price = float(open_pos.entry_price)
         size_usd = float(open_pos.size_usd)
         shares = size_usd / max(entry_price, 1e-6)
-        fee_bps = float(self.settings.fee_bps)
-        pnl_usd = (exit_price - entry_price) * shares - size_usd * (fee_bps / 10_000.0) * 2.0
+        fees = round_trip_fee_usd(
+            size_usd,
+            entry_price,
+            exit_price,
+            taker_fee_rate=float(self.settings.fee_taker_rate),
+            flat_fee_bps=float(self.settings.fee_bps),
+        )
+        pnl_usd = (exit_price - entry_price) * shares - fees
         pnl_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
         opened_at = open_pos.opened_at
         hold_seconds = (close_time - opened_at).total_seconds() if opened_at else 0.0
@@ -1841,8 +1849,14 @@ class DaemonRunner:
         entry_price = float(open_pos.entry_price)
         size_usd = float(open_pos.size_usd)
         shares = size_usd / max(entry_price, 1e-6)
-        fee_bps = float(self.settings.fee_bps)
-        pnl_usd = (float(exit_price) - entry_price) * shares - size_usd * (fee_bps / 10_000.0) * 2.0
+        fees = round_trip_fee_usd(
+            size_usd,
+            entry_price,
+            float(exit_price),
+            taker_fee_rate=float(self.settings.fee_taker_rate),
+            flat_fee_bps=float(self.settings.fee_bps),
+        )
+        pnl_usd = (float(exit_price) - entry_price) * shares - fees
         pnl_pct = (float(exit_price) - entry_price) / entry_price if entry_price > 0 else 0.0
         opened_at = open_pos.opened_at
         hold_seconds = (_utc_now() - opened_at).total_seconds() if opened_at else 0.0
@@ -2249,7 +2263,12 @@ class DaemonRunner:
                 )
                 continue
 
-            if check_fill(pending, features.ask_yes, features.ask_no):
+            if check_fill(
+                pending,
+                features.ask_yes,
+                features.ask_no,
+                mode=str(self.settings.paper_maker_fill_mode),
+            ):
                 # Guard (a): TTE floor on fills.
                 if no_fill_tte > 0 and tte_seconds <= no_fill_tte:
                     self._pending_mm_orders.pop(key, None)
@@ -2553,11 +2572,14 @@ class DaemonRunner:
         entry_price = float(leg.entry_price)
         size_usd = float(leg.size_usd)
         shares = size_usd / max(entry_price, 1e-6)
-        fee_bps = float(self.settings.fee_bps)
-        pnl_usd = (
-            (float(exit_price) - entry_price) * shares
-            - size_usd * (fee_bps / 10_000.0) * 2.0
+        fees = round_trip_fee_usd(
+            size_usd,
+            entry_price,
+            float(exit_price),
+            taker_fee_rate=float(self.settings.fee_taker_rate),
+            flat_fee_bps=float(self.settings.fee_bps),
         )
+        pnl_usd = (float(exit_price) - entry_price) * shares - fees
         pnl_pct = (
             (float(exit_price) - entry_price) / entry_price if entry_price > 0 else 0.0
         )
@@ -2625,7 +2647,12 @@ class DaemonRunner:
         pending = self._pending_makers.get(key)
 
         if pending is not None:
-            if check_fill(pending, features.ask_yes, features.ask_no):
+            if check_fill(
+                pending,
+                features.ask_yes,
+                features.ask_no,
+                mode=str(self.settings.paper_maker_fill_mode),
+            ):
                 await self._fill_paper_maker(pending, context)
                 self._pending_makers.pop(key, None)
                 return

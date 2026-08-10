@@ -259,7 +259,13 @@ def test_imbalance_tilt_keeps_natural_sign_when_drift_inverted(tmp_path: Path) -
 
 
 def test_edge_subtracts_ask_and_costs(tmp_path: Path) -> None:
-    settings = _settings(tmp_path, quant_slippage_baseline_bps=0.0, quant_slippage_spread_coef=0.0, fee_bps=0.0)
+    settings = _settings(
+        tmp_path,
+        quant_slippage_baseline_bps=0.0,
+        quant_slippage_spread_coef=0.0,
+        fee_bps=0.0,
+        fee_taker_rate=0.0,
+    )
     engine = QuantScoringEngine(settings)
     packet = _packet(ask_yes=0.40, ask_no=0.55, bid_yes=0.38, bid_no=0.53)
     assessment = engine.score_market(packet)
@@ -268,6 +274,25 @@ def test_edge_subtracts_ask_and_costs(tmp_path: Path) -> None:
     assert abs(assessment.edge_no + 0.05) < 1e-6
     assert assessment.suggested_side == SuggestedSide.YES
     assert assessment.edge == assessment.edge_yes
+
+
+def test_edge_subtracts_polymarket_fee_curve(tmp_path: Path) -> None:
+    """With fee_taker_rate set, each side's edge is reduced by the
+    Polymarket taker curve at its own ask: rate × p × (1 − p)."""
+    settings = _settings(
+        tmp_path,
+        quant_slippage_baseline_bps=0.0,
+        quant_slippage_spread_coef=0.0,
+        fee_bps=0.0,
+        fee_taker_rate=0.07,
+    )
+    engine = QuantScoringEngine(settings)
+    packet = _packet(ask_yes=0.40, ask_no=0.55, bid_yes=0.38, bid_no=0.53)
+    assessment = engine.score_market(packet)
+    fee_yes = 0.07 * 0.40 * 0.60  # 0.0168
+    fee_no = 0.07 * 0.55 * 0.45  # 0.017325
+    assert abs(assessment.edge_yes - (0.10 - fee_yes)) < 1e-6
+    assert abs(assessment.edge_no - (-0.05 - fee_no)) < 1e-6
 
 
 def test_pick_side_chooses_no_when_no_side_has_higher_edge(tmp_path: Path) -> None:

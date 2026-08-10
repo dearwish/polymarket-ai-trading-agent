@@ -3460,13 +3460,21 @@ function LivePortfolioPage({
     });
   }, [liveOrders]);
   const NOW_MS = Date.now();
-  let activeCount = 0;
-  let settledCount = 0;
+  const activePositions: LivePosition[] = [];
+  const settledPositions: LivePosition[] = [];
   for (const p of positions) {
     const endMs = p.end_date ? Date.parse(p.end_date) : NaN;
-    if (Number.isFinite(endMs) && endMs < NOW_MS) settledCount++;
-    else activeCount++;
+    const datePast = Number.isFinite(endMs) && endMs < NOW_MS;
+    // A position is resolved if its event ended, the backend flagged it
+    // settled, or its price has collapsed to 0 (resolved loser, -100% move) —
+    // the price signal catches markets that resolved before their listed
+    // end_date.
+    const isResolved = datePast || p.is_settled === true || p.current_price <= 0;
+    if (isResolved) settledPositions.push(p);
+    else activePositions.push(p);
   }
+  const activeCount = activePositions.length;
+  const settledCount = settledPositions.length;
 
   // Net total P&L: unrealised (cash_pnl from currently-open) + settled
   // markets we haven't redeemed yet (locked-in loss/gain) + realised
@@ -3477,6 +3485,66 @@ function LivePortfolioPage({
   const lifetimePnl = summary
     ? summary.total_cash_pnl_usd + settledUnredeemedPnl + summary.closed_realized_pnl_usd
     : 0;
+
+  // Shared row renderer for both the active and resolved position tables.
+  const renderPositionRow = (p: LivePosition) => {
+    const pctMove = p.avg_price > 0
+      ? ((p.current_price - p.avg_price) / p.avg_price) * 100
+      : 0;
+    const pnlColor = p.cash_pnl_usd >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)";
+    const eventSlug = p.event_slug || p.slug;
+    return (
+      <tr key={`${p.asset}-${p.outcome_index}`}>
+        <td>
+          {/* Primary: the option you actually bet on (team / candidate / direction).
+              Secondary: the underlying market question for context. */}
+          {(() => {
+            // Best-effort primary label. Backend enrichment provides
+            // option_title when available; fall back to the YES/NO outcome
+            // if the gamma /events lookup didn't surface a groupItemTitle.
+            const primary = (p.option_title && p.option_title.trim()) || p.outcome || "—";
+            const secondary = p.event_title || p.title || "";
+            const linkHref = eventSlug
+              ? `https://polymarket.com/event/${encodeURIComponent(eventSlug)}`
+              : null;
+            return (
+              <>
+                <div style={{ fontWeight: 600 }}>
+                  {linkHref ? (
+                    <a href={linkHref} target="_blank" rel="noopener noreferrer"
+                       style={{ color: "inherit", textDecoration: "underline" }}>
+                      {primary}
+                    </a>
+                  ) : primary}
+                </div>
+                {secondary && secondary !== primary && (
+                  <div className="muted" style={{ fontSize: "0.85em" }}>{secondary}</div>
+                )}
+              </>
+            );
+          })()}
+        </td>
+        <td>
+          <span className={`pill ${p.outcome_index === 0 ? "positive" : "negative"}`}
+                style={{ padding: "0.1em 0.5em", fontSize: "0.85em" }}>
+            {p.outcome}
+          </span>
+        </td>
+        <td style={{ textAlign: "right" }}>{p.size.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+        <td style={{ textAlign: "right" }}>{formatCents(p.avg_price)}</td>
+        <td style={{ textAlign: "right" }}>{formatCents(p.current_price)}</td>
+        <td style={{ textAlign: "right" }}>${p.cost_usd.toFixed(2)}</td>
+        <td style={{ textAlign: "right" }}>${p.current_value_usd.toFixed(2)}</td>
+        <td style={{ textAlign: "right", color: pnlColor }}>
+          {p.cash_pnl_usd >= 0 ? "+" : ""}${p.cash_pnl_usd.toFixed(2)}
+        </td>
+        <td style={{ textAlign: "right", color: pnlColor }}>
+          {pctMove >= 0 ? "+" : ""}{pctMove.toFixed(1)}%
+        </td>
+        <td className="muted">{p.end_date ? p.end_date.slice(0, 10) : "—"}</td>
+      </tr>
+    );
+  };
 
   return (
     <section className="page-section">
@@ -3542,21 +3610,17 @@ function LivePortfolioPage({
 
       <article className="card">
         <header className="card-header">
-          <h2>
-            Open positions · {activeCount} active
-            {settledCount > 0 && ` + ${settledCount} settled`}
-          </h2>
-          {positions.length > 0 && (
+          <h2>Open positions · {activeCount}</h2>
+          {activeCount > 0 && (
             <span className="muted" style={{ fontSize: "0.85em" }}>
-              held YES/NO tokens with non-trivial size
-              {settledCount > 0 && " · settled rows are greyed out (event ended, no longer actionable)"}
+              held YES/NO tokens with non-trivial size · event still pending
             </span>
           )}
         </header>
-        {positions.length === 0 && data !== null && (
+        {activeCount === 0 && data !== null && (
           <p className="muted">No open positions in this wallet.</p>
         )}
-        {positions.length > 0 && (
+        {activeCount > 0 && (
           <div className="table-wrap">
             <table>
               <thead>
@@ -3574,76 +3638,44 @@ function LivePortfolioPage({
                 </tr>
               </thead>
               <tbody>
-                {positions.map((p) => {
-                  const pctMove = p.avg_price > 0
-                    ? ((p.current_price - p.avg_price) / p.avg_price) * 100
-                    : 0;
-                  const pnlColor = p.cash_pnl_usd >= 0 ? "var(--positive, #2a8a3e)" : "var(--negative, #c0392b)";
-                  const eventSlug = p.event_slug || p.slug;
-                  const endMs = p.end_date ? Date.parse(p.end_date) : NaN;
-                  const isPast = Number.isFinite(endMs) && endMs < NOW_MS;
-                  const rowStyle: CSSProperties = isPast
-                    ? { opacity: 0.45, backgroundColor: "rgba(128,128,128,0.05)" }
-                    : {};
-                  return (
-                    <tr key={`${p.asset}-${p.outcome_index}`}
-                        style={rowStyle}
-                        title={isPast ? "Event ended — position is settled, no longer actionable" : undefined}>
-                      <td>
-                        {/* Primary: the option you actually bet on (team / candidate / direction).
-                            Secondary: the underlying market question for context. */}
-                        {(() => {
-                          // Best-effort primary label. Backend enrichment provides
-                          // option_title when available; fall back to the YES/NO outcome
-                          // if the gamma /events lookup didn't surface a groupItemTitle.
-                          const primary = (p.option_title && p.option_title.trim()) || p.outcome || "—";
-                          const secondary = p.event_title || p.title || "";
-                          const linkHref = eventSlug
-                            ? `https://polymarket.com/event/${encodeURIComponent(eventSlug)}`
-                            : null;
-                          return (
-                            <>
-                              <div style={{ fontWeight: 600 }}>
-                                {linkHref ? (
-                                  <a href={linkHref} target="_blank" rel="noopener noreferrer"
-                                     style={{ color: "inherit", textDecoration: "underline" }}>
-                                    {primary}
-                                  </a>
-                                ) : primary}
-                              </div>
-                              {secondary && secondary !== primary && (
-                                <div className="muted" style={{ fontSize: "0.85em" }}>{secondary}</div>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </td>
-                      <td>
-                        <span className={`pill ${p.outcome_index === 0 ? "positive" : "negative"}`}
-                              style={{ padding: "0.1em 0.5em", fontSize: "0.85em" }}>
-                          {p.outcome}
-                        </span>
-                      </td>
-                      <td style={{ textAlign: "right" }}>{p.size.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
-                      <td style={{ textAlign: "right" }}>{formatCents(p.avg_price)}</td>
-                      <td style={{ textAlign: "right" }}>{formatCents(p.current_price)}</td>
-                      <td style={{ textAlign: "right" }}>${p.cost_usd.toFixed(2)}</td>
-                      <td style={{ textAlign: "right" }}>${p.current_value_usd.toFixed(2)}</td>
-                      <td style={{ textAlign: "right", color: pnlColor }}>
-                        {p.cash_pnl_usd >= 0 ? "+" : ""}${p.cash_pnl_usd.toFixed(2)}
-                      </td>
-                      <td style={{ textAlign: "right", color: pnlColor }}>
-                        {pctMove >= 0 ? "+" : ""}{pctMove.toFixed(1)}%
-                      </td>
-                      <td className="muted">{p.end_date ? p.end_date.slice(0, 10) : "—"}</td>
-                    </tr>
-                  );
-                })}
+                {activePositions.map(renderPositionRow)}
               </tbody>
             </table>
           </div>
         )}
       </article>
+
+      {settledCount > 0 && (
+        <article className="card">
+          <header className="card-header">
+            <h2>Resolved positions · {settledCount}</h2>
+            <span className="muted" style={{ fontSize: "0.85em" }}>
+              event ended — P&L is locked in. Winning shares are redeemable; losing shares are worth $0.
+            </span>
+          </header>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Market</th>
+                  <th>Outcome</th>
+                  <th style={{ textAlign: "right" }}>Size</th>
+                  <th style={{ textAlign: "right" }}>Avg paid</th>
+                  <th style={{ textAlign: "right" }}>Current</th>
+                  <th style={{ textAlign: "right" }}>Cost</th>
+                  <th style={{ textAlign: "right" }}>Value</th>
+                  <th style={{ textAlign: "right" }}>P&L</th>
+                  <th style={{ textAlign: "right" }}>% move</th>
+                  <th>End</th>
+                </tr>
+              </thead>
+              <tbody>
+                {settledPositions.map(renderPositionRow)}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      )}
 
       <article className="card">
         <header className="card-header">
